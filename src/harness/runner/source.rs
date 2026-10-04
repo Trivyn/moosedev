@@ -72,6 +72,8 @@ pub(super) struct SourceView {
     /// Files outlined here that the previous prompt showed in full; the
     /// outlines section names them (see [`swap_notice`]).
     pub swapped: Vec<String>,
+    /// Files shown in full whose entity dossier rides in their entry.
+    pub embedded: BTreeSet<String>,
 }
 
 impl SourceView {
@@ -399,10 +401,17 @@ impl Runner {
     /// filled in rank order with a margin held back, so a small dip in the
     /// budget does not undo it. Errs when the file the model just read or
     /// edited cannot fit even alone.
+    ///
+    /// With `dossiers`, a file shown in full that has one carries it in its
+    /// entry, `{"text":…,"dossier":…}`, so an edit changes the prompt from
+    /// that file's entry onward and no further dossier with it. The framing
+    /// is never larger than the dossier's own list entry, which the caller
+    /// counts as protected.
     pub(super) fn source_view(
         &self,
         blocks: &[SourceBlock],
         budget: usize,
+        dossiers: Option<&BTreeMap<String, String>>,
     ) -> Result<SourceView, Oversized> {
         let by_file: BTreeMap<&str, &SourceBlock> = blocks
             .iter()
@@ -528,13 +537,24 @@ impl Runner {
         }
         // Counted in the protected part at its largest, as the swap notice is.
         outlines.push_str(&self.scope_note());
+        let mut embedded = BTreeSet::new();
         let entries: Vec<String> = full
             .iter()
             .map(|(file, text)| {
+                let text = serde_json::to_string(text).unwrap_or_default();
+                let value = match dossiers.and_then(|dossiers| dossiers.get(*file)) {
+                    Some(dossier) => {
+                        embedded.insert((*file).to_string());
+                        format!(
+                            "{{\"text\":{text},\"dossier\":{}}}",
+                            serde_json::to_string(dossier).unwrap_or_default()
+                        )
+                    }
+                    None => text,
+                };
                 format!(
-                    "{}:{}",
-                    serde_json::to_string(file).unwrap_or_default(),
-                    serde_json::to_string(text).unwrap_or_default()
+                    "{}:{value}",
+                    serde_json::to_string(file).unwrap_or_default()
                 )
             })
             .collect();
@@ -544,6 +564,7 @@ impl Runner {
             placed,
             budget,
             swapped,
+            embedded,
         })
     }
 }
@@ -596,7 +617,7 @@ mod tests {
             .lines()
             .next()
             .unwrap();
-        let full: BTreeMap<String, Option<String>> = serde_json::from_str(line).unwrap();
+        let full: BTreeMap<String, serde_json::Value> = serde_json::from_str(line).unwrap();
         full.into_keys().collect()
     }
 
@@ -990,7 +1011,7 @@ mod tests {
         let blocks = runner.source_blocks();
         let cost = |file: &str| blocks.iter().find(|b| b.file == file).unwrap().full_cost;
         let view = runner
-            .source_view(&blocks, cost("d.rs") + cost("c.rs"))
+            .source_view(&blocks, cost("d.rs") + cost("c.rs"), None)
             .unwrap();
         assert_eq!(view.full(), BTreeSet::from(["c.rs".into(), "d.rs".into()]));
         server.abort();
@@ -1061,7 +1082,7 @@ mod tests {
 
         // First prompt: the latest touch, then rank order; a above the
         // budget is outlined.
-        let view = runner.source_view(&blocks, budget).unwrap();
+        let view = runner.source_view(&blocks, budget, None).unwrap();
         assert_eq!(full(&view), ["b.rs", "c.rs", "d.rs"]);
         runner.task.source_full = view.full();
 
@@ -1069,7 +1090,9 @@ mod tests {
         // nothing needed: the set holds, although a.rs now outranks b.rs.
         runner.touch_source("a.rs");
         runner.touch_source("d.rs");
-        let view = runner.source_view(&blocks, budget - FILL_MARGIN).unwrap();
+        let view = runner
+            .source_view(&blocks, budget - FILL_MARGIN, None)
+            .unwrap();
         assert_eq!(full(&view), ["b.rs", "c.rs", "d.rs"]);
         assert!(
             view.receipt().unwrap().contains("full b.rs"),
@@ -1086,20 +1109,22 @@ mod tests {
 
         // A needed file comes in and the lowest-ranked kept file gives way.
         runner.touch_source("a.rs");
-        let view = runner.source_view(&blocks, budget).unwrap();
+        let view = runner.source_view(&blocks, budget, None).unwrap();
         assert_eq!(full(&view), ["a.rs", "c.rs", "d.rs"]);
         runner.task.source_full = view.full();
 
         // Spare room fills only with the margin held back: at a budget that
         // fits b.rs exactly, it stays outlined, so a dip cannot flip it.
         let exact = cost("a.rs") + cost("b.rs") + cost("c.rs") + cost("d.rs");
-        let view = runner.source_view(&blocks, exact).unwrap();
+        let view = runner.source_view(&blocks, exact, None).unwrap();
         assert_eq!(full(&view), ["a.rs", "c.rs", "d.rs"]);
-        let view = runner.source_view(&blocks, exact + FILL_MARGIN).unwrap();
+        let view = runner
+            .source_view(&blocks, exact + FILL_MARGIN, None)
+            .unwrap();
         assert_eq!(full(&view), ["a.rs", "b.rs", "c.rs", "d.rs"]);
 
         // The latest touch that cannot fit alone still stops the prompt.
-        assert!(runner.source_view(&blocks, cost("a.rs") - 1).is_err());
+        assert!(runner.source_view(&blocks, cost("a.rs") - 1, None).is_err());
         server.abort();
     }
 }

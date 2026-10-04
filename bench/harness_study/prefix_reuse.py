@@ -320,7 +320,8 @@ SOURCE_HEADER = "Current source, refreshed before this action:\n"
 
 def source_parts(text):
     """The source section as ({file: full text}, outlines text); None when the
-    section is not in the shape the harness writes."""
+    section is not in the shape the harness writes. A file that carries its
+    entity dossier in its entry (the stable head) gives its text alone."""
     if not text.startswith(SOURCE_HEADER):
         return None
     line, _, outlines = text[len(SOURCE_HEADER):].partition("\n")
@@ -328,7 +329,24 @@ def source_parts(text):
         full = json.loads(line)
     except ValueError:
         return None
-    return full, outlines
+    if not isinstance(full, dict):
+        return None
+    return {file: value["text"] if isinstance(value, dict) else value
+            for file, value in full.items()}, outlines
+
+
+def source_dossiers(text):
+    """The entity dossiers carried in source entries (the stable head), by
+    file; empty when there are none or the section is not the harness's."""
+    if not text.startswith(SOURCE_HEADER):
+        return {}
+    try:
+        full = json.loads(text[len(SOURCE_HEADER):].partition("\n")[0])
+    except ValueError:
+        return {}
+    if not isinstance(full, dict):
+        return {}
+    return {file: value.get("dossier") for file, value in full.items() if isinstance(value, dict)}
 
 
 def new_lines(before, after):
@@ -376,7 +394,9 @@ def ledger_replay(task, limit=98_976, cap=0.25, max_age=8):
             reason = "first"
         elif not warm:
             reason = "cache flushed"
-        elif any(parts.get(name) != last_parts.get(name) for name in LEDGER_REBUILD_SECTIONS):
+        elif any(parts.get(name) != last_parts.get(name) for name in LEDGER_REBUILD_SECTIONS) \
+                or source_dossiers(parts.get("source", "")) != source_dossiers(last_parts.get("source", "")):
+            # A dossier carried in a source entry is knowledge like the block's.
             reason = "head or knowledge changed"
         elif age >= max_age:
             reason = "age"

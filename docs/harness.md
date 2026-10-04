@@ -1481,7 +1481,11 @@ contract 3 and intent contract 2.
     - The output schema follows the rules under the json_schema contract,
       instead of being appended after the state (`schema_bytes` is then 0).
     - The fix paragraph sits with the allowed actions.
-    - Dossiers are in path order.
+    - Dossiers are in path order. A file shown in full carries its own
+      dossier in its source entry, `{"text":…,"dossier":…}` in place of
+      the plain text, so an edit re-reads that file's dossier and no
+      other. The "Entity dossiers" block after the outlines keeps the
+      dossiers of files not shown in full (`[]` when there are none).
   In the cafe runs, rule changes caused half of all re-read prompt bytes.
   The accepted knowledge stays in the head: replaying those runs' journals,
   moving it below the source saved about 2% of re-read bytes.

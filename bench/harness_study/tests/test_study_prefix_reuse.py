@@ -119,6 +119,13 @@ class PrefixReuseTest(unittest.TestCase):
         self.assertAlmostEqual(report["seconds_per_uncached_kb"], 1, delta=0.01)
         self.assertAlmostEqual(report["seconds_per_completion_token"], 0.05, delta=0.001)
 
+    def test_source_parts_reads_an_entry_that_carries_its_dossier(self):
+        line = json.dumps({"a.rs": "fn a() {}\n", "b.rs": {"text": "fn b() {}\n", "dossier": "b's contract"}})
+        full, outlines = prefix_reuse.source_parts(prefix_reuse.SOURCE_HEADER + line + "\nSource outlines (1):\n")
+        self.assertEqual(full, {"a.rs": "fn a() {}\n", "b.rs": "fn b() {}\n"})
+        self.assertEqual(outlines, "Source outlines (1):\n")
+        self.assertEqual(prefix_reuse.source_dossiers(prefix_reuse.SOURCE_HEADER + line + "\n"), {"b.rs": "b's contract"})
+
     def test_flips_count_changes_of_the_full_source_set(self):
         def action(full, budget=None, outlined=()):
             prompt = "You are the coding sensor.\nCurrent source, refreshed x\n" + json.dumps(

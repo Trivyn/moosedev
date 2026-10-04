@@ -1674,7 +1674,28 @@ impl Runner {
         // prefill a step over badciv runs 6-8, at 1.2 s a KB).
         // The source text ends with a newline, so the block needs none of
         // its own: the prompt is byte for byte as long as before.
+        // In the stable head a file shown in full carries its own dossier in
+        // its source entry, so an edit re-reads that file's dossier and no
+        // other (30% less re-read over the speed series' badciv journals);
+        // this block keeps the rest. Budgeted at its largest, the whole list.
         let dossier_block = format!("Entity dossiers:\n{dossiers}\n");
+        let embeddable: Option<BTreeMap<String, String>> = stable.then(|| {
+            let mut by_file: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for dossier in &context.files {
+                by_file
+                    .entry(dossier.file.as_str())
+                    .or_default()
+                    .push(dossier.dossier.as_str());
+            }
+            // A file with several dossiers keeps them in the block.
+            by_file
+                .into_iter()
+                .filter_map(|(file, dossiers)| match dossiers[..] {
+                    [only] => Some((file.to_string(), only.to_string())),
+                    _ => None,
+                })
+                .collect()
+        });
         let edited: Vec<_> = self.task.edits.iter().map(|edit| &edit.file).collect();
         let checks: Vec<_> = self
             .task
@@ -1773,10 +1794,22 @@ impl Runner {
             .source_view(
                 &blocks,
                 source_budget(limit, fixed + outlines, observation_reserve),
+                embeddable.as_ref(),
             )
             .map_err(|oversized| {
                 overflow(Some((oversized.file, oversized.bytes, oversized.budget)))
             })?;
+        let dossier_block = if source.embedded.is_empty() {
+            dossier_block
+        } else {
+            let mut rest: Vec<_> = context
+                .files
+                .iter()
+                .filter(|dossier| !source.embedded.contains(&dossier.file))
+                .collect();
+            rest.sort_by(|a, b| a.file.cmp(&b.file));
+            format!("Entity dossiers:\n{}\n", serde_json::to_string(&rest)?)
+        };
         let source_text = format!(
             "{SOURCE_HEADER}{}\n{}{dossier_block}",
             source.full_json, source.outlines

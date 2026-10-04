@@ -2762,6 +2762,49 @@ async fn the_prompt_keeps_the_source_ahead_of_the_dossiers() {
     );
 }
 
+/// In the stable head a file shown in full carries its entity dossier in its
+/// source entry, so an edit re-reads that file's dossier and no other; the
+/// trailing block keeps the dossiers of files not shown in full. Switched
+/// off, every dossier is in the trailing block.
+#[tokio::test]
+async fn a_full_file_carries_its_dossier_in_its_source_entry() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    for stable in [true, false] {
+        if !stable {
+            std::env::set_var("MOOSEDEV_HARNESS_STABLE_HEAD", "off");
+        }
+        let fixture = Fixture::new().await;
+        let mut runner = fixture.approved_interactive().await;
+        fixture.conversational(json!({"action":"read","file":"code.txt"}));
+        runner.advance().await.unwrap();
+        std::env::remove_var("MOOSEDEV_HARNESS_STABLE_HEAD");
+        let prompt = fixture.last_model_prompt("harness_action");
+        let line = prompt
+            .split_once("Current source, refreshed before this action:\n")
+            .unwrap()
+            .1
+            .lines()
+            .next()
+            .unwrap();
+        let source: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
+        let trailing = prompt.split_once("\nEntity dossiers:\n").unwrap().1;
+        let trailing = trailing.lines().next().unwrap();
+        let dossier = "COMPLETE_DOSSIER_FOR_code.txt";
+        if stable {
+            let entry = &source["code.txt"];
+            assert!(entry["text"].is_string(), "{entry}");
+            assert!(
+                entry["dossier"].as_str().unwrap().starts_with(dossier),
+                "{entry}"
+            );
+            assert!(!trailing.contains(dossier), "{trailing}");
+        } else {
+            assert!(source["code.txt"].is_string());
+            assert!(trailing.contains(dossier), "{trailing}");
+        }
+    }
+}
+
 /// The stable head keeps what changes mid-cycle out of the prompt's start:
 /// the output schema follows the rules. Switched off, the earlier order: the
 /// schema last. The knowledge is in the head either way.
