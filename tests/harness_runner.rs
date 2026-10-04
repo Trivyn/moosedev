@@ -2730,10 +2730,8 @@ async fn the_plan_is_shown_above_the_source_and_the_changing_state() {
     let plan = at("\nPlan: {");
     let source = at("Current source, refreshed");
     let state = at("Current harness state");
-    // The accepted knowledge follows the source in the stable head: it
-    // depends on the step's target files.
     assert!(
-        plan < source && source < knowledge && knowledge < state,
+        knowledge < plan && plan < source && source < state,
         "knowledge {knowledge}, plan {plan}, source {source}, state {state}"
     );
     assert!(prompt[state..].find("\nPlan: ").is_none(), "shown once");
@@ -2759,16 +2757,16 @@ async fn the_prompt_keeps_the_source_ahead_of_the_dossiers() {
     let dossiers = at("\nEntity dossiers:\n");
     let state = at("Current harness state");
     assert!(
-        source < dossiers && dossiers < knowledge && knowledge < state,
+        knowledge < source && source < dossiers && dossiers < state,
         "knowledge {knowledge}, source {source}, dossiers {dossiers}, state {state}"
     );
 }
 
 /// The stable head keeps what changes mid-cycle out of the prompt's start:
-/// the output schema follows the rules, the knowledge follows the source.
-/// Switched off, the earlier order: knowledge in the head, the schema last.
+/// the output schema follows the rules. Switched off, the earlier order: the
+/// schema last. The knowledge is in the head either way.
 #[tokio::test]
-async fn the_stable_head_moves_the_schema_up_and_the_knowledge_down() {
+async fn the_stable_head_moves_the_schema_up() {
     let _env_lock = ENVIRONMENT.lock().await;
     for stable in [true, false] {
         if !stable {
@@ -2789,7 +2787,7 @@ async fn the_stable_head_moves_the_schema_up_and_the_knowledge_down() {
         let last = prompt.rfind("Last result:\n").unwrap();
         if stable {
             assert!(
-                schema < source && source < knowledge,
+                schema < knowledge && knowledge < source,
                 "schema {schema}, source {source}, knowledge {knowledge}"
             );
         } else {

@@ -104,7 +104,6 @@ fn assert_receipts(runner: &Runner) -> Vec<Value> {
         );
         let sections: u64 = [
             "head_bytes",
-            "knowledge_bytes",
             "navigation_bytes",
             "observations_bytes",
             "state_bytes",

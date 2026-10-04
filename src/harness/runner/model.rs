@@ -231,7 +231,7 @@ fn rule_entry(rule: &GoverningRule, state: &RuleState) -> String {
 const RULES_DELTA_LIMIT: usize = 4_000;
 
 /// `MOOSEDEV_HARNESS_STABLE_HEAD=off` builds the step prompt in the earlier
-/// order: rules rendered afresh every step, knowledge in the head, the fix
+/// order: rules rendered afresh every step, the fix
 /// paragraph with the instructions, the schema after everything.
 pub(super) fn stable_head_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_STABLE_HEAD").map_or(true, |value| value.trim() != "off")
@@ -463,9 +463,6 @@ pub(super) fn prompt_limit(config: &LlmConfig, cap: usize) -> usize {
 struct Mandatory {
     head: String,
     source_text: String,
-    /// The accepted knowledge, after the source in the stable head; empty
-    /// when it is in `head`.
-    knowledge: String,
     state: String,
     /// Bytes left after it and the output schema.
     remaining: usize,
@@ -1619,22 +1616,13 @@ impl Runner {
         // Replanning approved work, the planner amends the approved plan and
         // sees it whole (bounded), so it does not page it from the journal.
         let amending = self.amending_approved_plan();
-        // In the stable head the accepted knowledge follows the source: it
-        // depends on the step's target files, and in the head every change
-        // cost the whole prompt after it (15% of re-read bytes, cafe runs).
-        let knowledge = if stable {
-            prompt.push_str(&format!(
-                "\nConfigured model ID: {}\nCurrent human objective: {}\n",
-                config.model, self.task.objective,
-            ));
-            format!("Current accepted knowledge:\n{}\n", context.context)
-        } else {
-            prompt.push_str(&format!(
-                "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",
-                config.model, self.task.objective, context.context,
-            ));
-            String::new()
-        };
+        // The accepted knowledge stays in the head: replaying the speed
+        // series' journals, moving it below the source saved under 2% of
+        // re-read bytes.
+        prompt.push_str(&format!(
+            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",
+            config.model, self.task.objective, context.context,
+        ));
         // The Plan line, ending the head, for a given summary view. Chosen
         // below, once the rest of the protected prompt is known.
         let plan_line = |summary: Option<String>| -> Result<String> {
@@ -1739,12 +1727,8 @@ impl Runner {
         // Every file is at least outlined, so all outlines are protected.
         let blocks = self.source_blocks();
         let outlines = protected_source(&blocks) + self.scope_note().len();
-        let rest = SOURCE_HEADER.len()
-            + "{}\n".len()
-            + dossier_block.len()
-            + knowledge.len()
-            + state.len()
-            + schema_bytes;
+        let rest =
+            SOURCE_HEADER.len() + "{}\n".len() + dossier_block.len() + state.len() + schema_bytes;
         // The whole plan only while the source keeps its whole share beside
         // it and the observation floor: its extra bytes then come out of the
         // optional sections, never out of source, and cannot overflow a
@@ -1797,12 +1781,10 @@ impl Runner {
             "{SOURCE_HEADER}{}\n{}{dossier_block}",
             source.full_json, source.outlines
         );
-        let required =
-            prompt.len() + source_text.len() + knowledge.len() + state.len() + schema_bytes;
+        let required = prompt.len() + source_text.len() + state.len() + schema_bytes;
         Ok(Mandatory {
             head: prompt,
             source_text,
-            knowledge,
             state,
             remaining: limit.saturating_sub(required),
             source,
@@ -2027,7 +2009,6 @@ impl Runner {
         let Mandatory {
             head,
             source_text,
-            knowledge,
             state,
             mut remaining,
             source,
@@ -2090,7 +2071,6 @@ impl Runner {
         let head_bytes = head.len();
         let mut prompt = head;
         prompt.push_str(&source_text);
-        prompt.push_str(&knowledge);
         prompt.push_str(&navigation);
         prompt.push_str(&history);
         prompt.push_str(&state);
@@ -2108,7 +2088,6 @@ impl Runner {
             navigation_bytes: navigation.len(),
             observations_bytes: observations.len(),
             head_bytes,
-            knowledge_bytes: knowledge.len(),
             state_bytes: state.len(),
             // What the request appends is added when it is sent.
             schema_bytes: 0,

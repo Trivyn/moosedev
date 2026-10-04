@@ -26,13 +26,9 @@ pub(super) struct ContextPlan {
     pub history: HistoryPlan,
     pub navigation_bytes: usize,
     pub observations_bytes: usize,
-    /// Role, guidance, rules, instructions and the plan; also the knowledge
-    /// and the output schema in the earlier order (`stable_head_enabled`).
+    /// Role, guidance, rules, instructions, knowledge and the plan; in the
+    /// stable head (`stable_head_enabled`) also the output schema.
     pub head_bytes: usize,
-    /// The accepted knowledge after the source, in the stable head; 0 when
-    /// it is in the head.
-    #[serde(default)]
-    pub knowledge_bytes: usize,
     /// Guidance, harness state and the allowed actions.
     pub state_bytes: usize,
     /// The output schema appended to the prompt under the json_schema

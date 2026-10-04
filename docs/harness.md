@@ -1480,12 +1480,12 @@ contract 3 and intent contract 2.
       rendered afresh.
     - The output schema follows the rules under the json_schema contract,
       instead of being appended after the state (`schema_bytes` is then 0).
-    - The accepted knowledge follows the source and dossiers
-      (`knowledge_bytes`).
     - The fix paragraph sits with the allowed actions.
     - Dossiers are in path order.
-  In the cafe runs, rule changes caused half of all re-read prompt bytes and
-  the knowledge block 15%. `MOOSEDEV_HARNESS_STABLE_HEAD=off` restores the
+  In the cafe runs, rule changes caused half of all re-read prompt bytes.
+  The accepted knowledge stays in the head: replaying those runs' journals,
+  moving it below the source saved under 2% of re-read bytes.
+  `MOOSEDEV_HARNESS_STABLE_HEAD=off` restores the
   earlier order. `bench/harness_study/prefix_reuse.py` measures the shared
   prefix from task journals.
 - Context plan receipt. Every step-action request records what each prompt
@@ -1499,8 +1499,7 @@ contract 3 and intent contract 2.
   as an `outline` or `listed`, the full-source `budget`, and the files shown
   in full in and out of the scope, `scope_full` and `nonscope_full`);
   `history` (`bytes` and the `earlier_tasks` lines it shows);
-  `navigation_bytes`, `observations_bytes`, `head_bytes`, `knowledge_bytes`
-  (the knowledge after the source, in the stable head) and `state_bytes`;
+  `navigation_bytes`, `observations_bytes`, `head_bytes` and `state_bytes`;
   `schema_bytes`, the output schema appended under the json_schema contract
   (0 under tools, whose definitions travel beside the prompt), and
   `repair_bytes`, the rejection note a repair attempt appends; `total`, the
