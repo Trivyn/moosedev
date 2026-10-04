@@ -1617,7 +1617,7 @@ impl Runner {
         // sees it whole (bounded), so it does not page it from the journal.
         let amending = self.amending_approved_plan();
         // The accepted knowledge stays in the head: replaying the speed
-        // series' journals, moving it below the source saved under 2% of
+        // series' journals, moving it below the source saved about 2% of
         // re-read bytes.
         prompt.push_str(&format!(
             "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",

@@ -1484,7 +1484,7 @@ contract 3 and intent contract 2.
     - Dossiers are in path order.
   In the cafe runs, rule changes caused half of all re-read prompt bytes.
   The accepted knowledge stays in the head: replaying those runs' journals,
-  moving it below the source saved under 2% of re-read bytes.
+  moving it below the source saved about 2% of re-read bytes.
   `MOOSEDEV_HARNESS_STABLE_HEAD=off` restores the
   earlier order. `bench/harness_study/prefix_reuse.py` measures the shared
   prefix from task journals.
