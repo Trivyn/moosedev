@@ -184,8 +184,8 @@ impl Runner {
                 && preview
                     .entries
                     .iter()
-                    .map(|entry| &entry.draft)
-                    .eq(request.drafts.iter()),
+                    .zip(&request.drafts)
+                    .all(|(entry, sent)| preserved(&entry.draft, sent)),
             "daemon spec preview did not preserve the validated extraction batch"
         );
 
@@ -517,6 +517,21 @@ impl Runner {
 }
 
 pub(super) const SPEC_EXTRACT_PURPOSE: &str = "harness_spec_extract";
+
+/// Whether the daemon kept a draft as sent. The one change allowed is the
+/// daemon's qualification of a title that names other knowledge:
+/// `Title (spec-stem)`, or `Title (spec-stem N)`.
+fn preserved(returned: &SpecRecordDraft, sent: &SpecRecordDraft) -> bool {
+    let title = returned.title == sent.title
+        || returned
+            .title
+            .strip_prefix(&format!("{} (", sent.title))
+            .is_some_and(|rest| rest.ends_with(')') && !rest[..rest.len() - 1].contains('('));
+    title
+        && returned.kind == sent.kind
+        && returned.description == sent.description
+        && returned.evidence == sent.evidence
+}
 
 /// The objective of a task started by `/approve-spec <path>`. Approval
 /// fulfils it, so the task then waits for the human to name the next one.

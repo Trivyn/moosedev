@@ -161,6 +161,27 @@ pub async fn approve(
     Ok(Json(response))
 }
 
+/// `title` qualified with the spec it comes from, `Title (spec-stem)`, and a
+/// number after that while the result still names current knowledge.
+fn qualified_title(
+    state: &AppState,
+    kind: &str,
+    title: &str,
+    path: &str,
+) -> anyhow::Result<String> {
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(path);
+    let mut candidate = format!("{title} ({stem})");
+    let mut n = 2;
+    while !current_records_with_title(state, kind, &candidate)?.is_empty() {
+        candidate = format!("{title} ({stem} {n})");
+        n += 1;
+    }
+    Ok(candidate)
+}
+
 pub fn prepare_operation(
     state: &AppState,
     request: SpecPrepareRequest,
@@ -202,8 +223,11 @@ pub fn prepare_operation(
     let mut retained_previous = HashSet::new();
     let mut claimed_targets = HashSet::new();
     for draft in &request.drafts {
+        // A title that names other knowledge under a different claim is
+        // qualified with this spec's name below; the entry keeps that title.
+        let mut draft = draft.clone();
         let key = (draft.kind.clone(), normalize(&draft.title));
-        let claim = claim(draft);
+        let claim = claim(&draft);
         let disposition = if let Some(old) = previous_by_key.get(&key) {
             if old.description == claim {
                 retained_previous.insert(old.iri.clone());
@@ -234,12 +258,19 @@ pub fn prepare_operation(
                 SpecDisposition::Reuse {
                     iri: existing.iri.clone(),
                 }
+            } else if !same_title.is_empty() {
+                // The same title over a different claim names other
+                // knowledge. The restatement score cannot tell the two apart
+                // (the matching title dominates it), so this record is minted
+                // under its title qualified with the spec it comes from,
+                // rather than failing the whole approval (cafe phase 3
+                // restated "On-hand is the sum of append-only movements" and
+                // every approval was refused) or merging different claims.
+                draft.title = qualified_title(state, &draft.kind, &draft.title, &request.path)?;
+                SpecDisposition::New {
+                    iri: graph::mint_instance_iri(&draft.kind),
+                }
             } else {
-                anyhow::ensure!(
-                    same_title.is_empty(),
-                    "spec record title {:?} already names different accepted knowledge outside this spec; qualify the title",
-                    draft.title
-                );
                 let proposal = KnowledgeProposal {
                     kind: draft.kind.clone(),
                     title: draft.title.clone(),
@@ -2960,6 +2991,61 @@ mod tests {
             &preview.entries[0].disposition,
             SpecDisposition::Reuse { iri } if iri == &existing
         ));
+    }
+
+    /// A spec record whose title names other accepted knowledge under a
+    /// different claim is qualified with the spec's name and minted, rather
+    /// than failing the whole approval (cafe phase 3 restated a phase-1 title
+    /// and every approval was refused).
+    #[test]
+    fn a_title_naming_other_knowledge_is_qualified_not_refused() {
+        let fixture = Fixture::new();
+        let hash = fixture.write_spec("# Spec\nMovements are the ledger.\n");
+        let state = fixture.state();
+        let title = "Movements are the ledger";
+        graph::record_instance(
+            &state,
+            &RecordInput {
+                class_iri: state.resolve_class("Requirement").unwrap(),
+                class_local: "Requirement".into(),
+                properties: vec![
+                    (moose::RDFS_LABEL.into(), title.into()),
+                    (state.capture.title.clone(), title.into()),
+                    (
+                        state.capture.description.clone(),
+                        "Deliveries are batched weekly by the warehouse team.".into(),
+                    ),
+                ],
+            },
+            "test-human",
+            Utc::now(),
+        )
+        .unwrap();
+        state.note_project_write();
+
+        let preview = prepare_operation(
+            &state,
+            prepare_request(
+                "spec-qualified-title",
+                hash,
+                accepted_revision(&state).unwrap(),
+                vec![draft(
+                    "Requirement",
+                    title,
+                    "Every stock change is an append-only movement row.",
+                    2,
+                )],
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            preview.entries[0].disposition,
+            SpecDisposition::New { .. }
+        ));
+        assert_eq!(
+            preview.entries[0].draft.title,
+            "Movements are the ledger (spec)"
+        );
     }
 
     #[test]
