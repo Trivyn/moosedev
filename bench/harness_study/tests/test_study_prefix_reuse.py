@@ -124,7 +124,7 @@ class PrefixReuseTest(unittest.TestCase):
         full, outlines = prefix_reuse.source_parts(prefix_reuse.SOURCE_HEADER + line + "\nSource outlines (1):\n")
         self.assertEqual(full, {"a.rs": "fn a() {}\n", "b.rs": "fn b() {}\n"})
         self.assertEqual(outlines, "Source outlines (1):\n")
-        self.assertEqual(prefix_reuse.source_dossiers(prefix_reuse.SOURCE_HEADER + line + "\n"), {"b.rs": "b's contract"})
+        self.assertEqual(prefix_reuse.source_dossiers(prefix_reuse.SOURCE_HEADER + line + "\n"), {"b.rs": {"dossier": "b's contract"}})
 
     def test_flips_count_changes_of_the_full_source_set(self):
         def action(full, budget=None, outlined=()):

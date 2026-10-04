@@ -2769,6 +2769,7 @@ async fn the_prompt_keeps_the_source_ahead_of_the_dossiers() {
 #[tokio::test]
 async fn a_full_file_carries_its_dossier_in_its_source_entry() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let mut embedded: Vec<Value> = Vec::new();
     for stable in [true, false] {
         if !stable {
             std::env::set_var("MOOSEDEV_HARNESS_STABLE_HEAD", "off");
@@ -2790,17 +2791,31 @@ async fn a_full_file_carries_its_dossier_in_its_source_entry() {
         let trailing = prompt.split_once("\nEntity dossiers:\n").unwrap().1;
         let trailing = trailing.lines().next().unwrap();
         let dossier = "COMPLETE_DOSSIER_FOR_code.txt";
+        let trailing: Vec<Value> = serde_json::from_str(trailing).unwrap();
         if stable {
-            let entry = &source["code.txt"];
+            let mut entry = source["code.txt"].clone();
             assert!(entry["text"].is_string(), "{entry}");
             assert!(
-                entry["dossier"].as_str().unwrap().starts_with(dossier),
-                "{entry}"
+                trailing.iter().all(|listed| listed["file"] != "code.txt"),
+                "{trailing:?}"
             );
-            assert!(!trailing.contains(dossier), "{trailing}");
+            // Everything the block would have shown of it, its policy too.
+            entry.as_object_mut().unwrap().remove("text");
+            entry["file"] = json!("code.txt");
+            embedded.push(entry);
         } else {
             assert!(source["code.txt"].is_string());
-            assert!(trailing.contains(dossier), "{trailing}");
+            let listed = trailing
+                .iter()
+                .find(|listed| listed["file"] == "code.txt")
+                .unwrap();
+            assert!(listed["dossier"].as_str().unwrap().starts_with(dossier));
+            assert!(listed["policy"].is_object(), "{listed}");
+            assert_eq!(
+                embedded,
+                std::slice::from_ref(listed),
+                "the same entry either way"
+            );
         }
     }
 }

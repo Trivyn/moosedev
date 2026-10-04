@@ -1679,23 +1679,32 @@ impl Runner {
         // other (30% less re-read over the speed series' badciv journals);
         // this block keeps the rest. Budgeted at its largest, the whole list.
         let dossier_block = format!("Entity dossiers:\n{dossiers}\n");
-        let embeddable: Option<BTreeMap<String, String>> = stable.then(|| {
-            let mut by_file: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        // Each entry whole but its file (the dossier and the edit policy),
+        // as the block shows it.
+        let embeddable: Option<BTreeMap<String, String>> = if stable {
+            let mut by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
             for dossier in &context.files {
+                let mut entry = serde_json::to_value(dossier)?;
+                if let Some(fields) = entry.as_object_mut() {
+                    fields.remove("file");
+                }
                 by_file
                     .entry(dossier.file.as_str())
                     .or_default()
-                    .push(dossier.dossier.as_str());
+                    .push(serde_json::to_string(&entry)?);
             }
             // A file with several dossiers keeps them in the block.
-            by_file
-                .into_iter()
-                .filter_map(|(file, dossiers)| match dossiers[..] {
-                    [only] => Some((file.to_string(), only.to_string())),
-                    _ => None,
-                })
-                .collect()
-        });
+            Some(
+                by_file
+                    .into_iter()
+                    .filter_map(|(file, mut entries)| {
+                        (entries.len() == 1).then(|| (file.to_string(), entries.remove(0)))
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
         let edited: Vec<_> = self.task.edits.iter().map(|edit| &edit.file).collect();
         let checks: Vec<_> = self
             .task

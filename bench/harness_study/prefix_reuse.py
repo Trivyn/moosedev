@@ -336,8 +336,9 @@ def source_parts(text):
 
 
 def source_dossiers(text):
-    """The entity dossiers carried in source entries (the stable head), by
-    file; empty when there are none or the section is not the harness's."""
+    """The dossier entries (dossier and policy) carried in source entries
+    (the stable head), by file; empty when there are none or the section is
+    not the harness's."""
     if not text.startswith(SOURCE_HEADER):
         return {}
     try:
@@ -346,7 +347,8 @@ def source_dossiers(text):
         return {}
     if not isinstance(full, dict):
         return {}
-    return {file: value.get("dossier") for file, value in full.items() if isinstance(value, dict)}
+    return {file: {key: v for key, v in value.items() if key != "text"}
+            for file, value in full.items() if isinstance(value, dict)}
 
 
 def new_lines(before, after):

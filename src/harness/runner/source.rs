@@ -402,11 +402,12 @@ impl Runner {
     /// budget does not undo it. Errs when the file the model just read or
     /// edited cannot fit even alone.
     ///
-    /// With `dossiers`, a file shown in full that has one carries it in its
-    /// entry, `{"text":…,"dossier":…}`, so an edit changes the prompt from
-    /// that file's entry onward and no further dossier with it. The framing
-    /// is never larger than the dossier's own list entry, which the caller
-    /// counts as protected.
+    /// `dossiers` maps a file to its dossier entry without the file, as a
+    /// JSON object (`{"dossier":…,"policy":…}`). A file shown in full that
+    /// has one carries it in its entry, `{"text":…,"dossier":…,…}`, so an
+    /// edit changes the prompt from that file's entry onward and no further
+    /// dossier with it. The framing is never larger than the dossier's own
+    /// list entry, which the caller counts as protected.
     pub(super) fn source_view(
         &self,
         blocks: &[SourceBlock],
@@ -542,13 +543,14 @@ impl Runner {
             .iter()
             .map(|(file, text)| {
                 let text = serde_json::to_string(text).unwrap_or_default();
-                let value = match dossiers.and_then(|dossiers| dossiers.get(*file)) {
-                    Some(dossier) => {
+                let fields = dossiers
+                    .and_then(|dossiers| dossiers.get(*file))
+                    .and_then(|entry| entry.strip_prefix('{'))
+                    .filter(|fields| *fields != "}");
+                let value = match fields {
+                    Some(fields) => {
                         embedded.insert((*file).to_string());
-                        format!(
-                            "{{\"text\":{text},\"dossier\":{}}}",
-                            serde_json::to_string(dossier).unwrap_or_default()
-                        )
+                        format!("{{\"text\":{text},{fields}")
                     }
                     None => text,
                 };
