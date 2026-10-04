@@ -504,12 +504,22 @@ def prompt_read_files(prompt):
     position = prompt.find(marker)
     if position < 0:
         return []
-    line = prompt[position + len(marker):].split("\n", 1)[0]
-    try:
-        value = json.loads(line)
-    except ValueError:
-        return []
-    return sorted(value) if isinstance(value, dict) else []
+    # One source object, or (the stable head) one a line, each optionally
+    # followed by its entity dossier line.
+    files = set()
+    for line in prompt[position + len(marker):].split("\n"):
+        if line.startswith("Entity dossier: ") and files:
+            continue
+        if not line.startswith("{"):
+            break
+        try:
+            value = json.loads(line)
+        except ValueError:
+            break
+        if not isinstance(value, dict):
+            break
+        files.update(value)
+    return sorted(files)
 
 
 def linked_claims(prompt):

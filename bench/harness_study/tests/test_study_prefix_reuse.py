@@ -119,12 +119,22 @@ class PrefixReuseTest(unittest.TestCase):
         self.assertAlmostEqual(report["seconds_per_uncached_kb"], 1, delta=0.01)
         self.assertAlmostEqual(report["seconds_per_completion_token"], 0.05, delta=0.001)
 
-    def test_source_parts_reads_an_entry_that_carries_its_dossier(self):
-        line = json.dumps({"a.rs": "fn a() {}\n", "b.rs": {"text": "fn b() {}\n", "dossier": "b's contract"}})
-        full, outlines = prefix_reuse.source_parts(prefix_reuse.SOURCE_HEADER + line + "\nSource outlines (1):\n")
+    def test_source_parts_reads_one_file_a_line_with_dossier_lines(self):
+        body = (json.dumps({"a.rs": "fn a() {}\n"}) + "\n" + json.dumps({"b.rs": "fn b() {}\n"}) + "\n"
+                + "Entity dossier: " + json.dumps({"file": "b.rs", "dossier": "b's contract", "policy": {"decision": "allow"}})
+                + "\nSource outlines (1):\n")
+        text = prefix_reuse.SOURCE_HEADER + body
+        full, outlines = prefix_reuse.source_parts(text)
         self.assertEqual(full, {"a.rs": "fn a() {}\n", "b.rs": "fn b() {}\n"})
         self.assertEqual(outlines, "Source outlines (1):\n")
-        self.assertEqual(prefix_reuse.source_dossiers(prefix_reuse.SOURCE_HEADER + line + "\n"), {"b.rs": {"dossier": "b's contract"}})
+        self.assertEqual(prefix_reuse.source_dossiers(text),
+                         {"b.rs": {"file": "b.rs", "dossier": "b's contract", "policy": {"decision": "allow"}}})
+        self.assertEqual(prefix_reuse.full_source({"prompt": "x\n" + text}), frozenset({"a.rs", "b.rs"}))
+        older = prefix_reuse.SOURCE_HEADER + json.dumps({"b.rs": {"text": "t", "dossier": "d", "policy": {}}}) + "\nrest"
+        self.assertEqual(prefix_reuse.source_parts(older), ({"b.rs": "t"}, "rest"))
+        self.assertEqual(prefix_reuse.source_dossiers(older), {"b.rs": {"file": "b.rs", "dossier": "d", "policy": {}}})
+        one = prefix_reuse.SOURCE_HEADER + json.dumps({"a.rs": "x", "b.rs": None}) + "\nrest"
+        self.assertEqual(prefix_reuse.source_parts(one), ({"a.rs": "x", "b.rs": None}, "rest"))
 
     def test_flips_count_changes_of_the_full_source_set(self):
         def action(full, budget=None, outlined=()):

@@ -2,7 +2,7 @@
 use super::context_plan::{ContextPlan, HistoryPlan, RulesPlan, SourcePlan};
 use super::plan_choices::{self, ProposedChoice};
 use super::rule_state::{self, RuleState, RulesReceipt};
-use super::source::{protected_source, source_budget, SourceView};
+use super::source::{per_line_framing, protected_source, source_budget, SourceView};
 use super::symbolic;
 use super::task::KnowledgeSearchResult;
 use super::tools;
@@ -1674,24 +1674,24 @@ impl Runner {
         // prefill a step over badciv runs 6-8, at 1.2 s a KB).
         // The source text ends with a newline, so the block needs none of
         // its own: the prompt is byte for byte as long as before.
-        // In the stable head a file shown in full carries its own dossier in
-        // its source entry, so an edit re-reads that file's dossier and no
-        // other (30% less re-read over the speed series' badciv journals);
-        // this block keeps the rest. Budgeted at its largest, the whole list.
+        // In the stable head each file shown in full is its own source line,
+        // followed by its dossier line, so an edit re-reads that file's
+        // dossier and no other (23-30% less re-read over the badciv
+        // journals); this block keeps the rest. Budgeted at its largest, the
+        // whole list, with the per-line framing.
+        // The line keeps a file's text a plain string, as the model reads it:
+        // carried inside a {"text":…} object instead, the model asked to read
+        // those files again as if it lacked them (dossier series orT2).
         let dossier_block = format!("Entity dossiers:\n{dossiers}\n");
-        // Each entry whole but its file (the dossier and the edit policy),
-        // as the block shows it.
+        // Each entry whole (file, dossier and edit policy), as the block
+        // shows it.
         let embeddable: Option<BTreeMap<String, String>> = if stable {
             let mut by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
             for dossier in &context.files {
-                let mut entry = serde_json::to_value(dossier)?;
-                if let Some(fields) = entry.as_object_mut() {
-                    fields.remove("file");
-                }
                 by_file
                     .entry(dossier.file.as_str())
                     .or_default()
-                    .push(serde_json::to_string(&entry)?);
+                    .push(serde_json::to_string(dossier)?);
             }
             // A file with several dossiers keeps them in the block.
             Some(
@@ -1757,8 +1757,17 @@ impl Runner {
         // Every file is at least outlined, so all outlines are protected.
         let blocks = self.source_blocks();
         let outlines = protected_source(&blocks) + self.scope_note().len();
-        let rest =
-            SOURCE_HEADER.len() + "{}\n".len() + dossier_block.len() + state.len() + schema_bytes;
+        let framing = if stable {
+            per_line_framing(blocks.len(), context.files.len())
+        } else {
+            0
+        };
+        let rest = SOURCE_HEADER.len()
+            + "{}\n".len()
+            + dossier_block.len()
+            + framing
+            + state.len()
+            + schema_bytes;
         // The whole plan only while the source keeps its whole share beside
         // it and the observation floor: its extra bytes then come out of the
         // optional sections, never out of source, and cannot overflow a

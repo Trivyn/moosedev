@@ -2762,14 +2762,16 @@ async fn the_prompt_keeps_the_source_ahead_of_the_dossiers() {
     );
 }
 
-/// In the stable head a file shown in full carries its entity dossier in its
-/// source entry, so an edit re-reads that file's dossier and no other; the
-/// trailing block keeps the dossiers of files not shown in full. Switched
-/// off, every dossier is in the trailing block.
+/// In the stable head each file shown in full is its own source line, its
+/// text a plain string, followed by its entity dossier line, so an edit
+/// re-reads that file's dossier and no other; the trailing block keeps the
+/// dossiers of files not shown in full. Switched off, one source object and
+/// every dossier in the trailing block. The dossier entry is the same either
+/// way, edit policy included.
 #[tokio::test]
-async fn a_full_file_carries_its_dossier_in_its_source_entry() {
+async fn a_full_file_is_followed_by_its_dossier_line() {
     let _env_lock = ENVIRONMENT.lock().await;
-    let mut embedded: Vec<Value> = Vec::new();
+    let mut beside: Vec<Value> = Vec::new();
     for stable in [true, false] {
         if !stable {
             std::env::set_var("MOOSEDEV_HARNESS_STABLE_HEAD", "off");
@@ -2780,39 +2782,44 @@ async fn a_full_file_carries_its_dossier_in_its_source_entry() {
         runner.advance().await.unwrap();
         std::env::remove_var("MOOSEDEV_HARNESS_STABLE_HEAD");
         let prompt = fixture.last_model_prompt("harness_action");
-        let line = prompt
+        let mut lines = prompt
             .split_once("Current source, refreshed before this action:\n")
             .unwrap()
             .1
-            .lines()
-            .next()
-            .unwrap();
-        let source: serde_json::Map<String, Value> = serde_json::from_str(line).unwrap();
+            .lines();
+        let source: serde_json::Map<String, Value> =
+            serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert!(source["code.txt"].is_string(), "{source:?}");
         let trailing = prompt.split_once("\nEntity dossiers:\n").unwrap().1;
-        let trailing = trailing.lines().next().unwrap();
-        let dossier = "COMPLETE_DOSSIER_FOR_code.txt";
-        let trailing: Vec<Value> = serde_json::from_str(trailing).unwrap();
+        let trailing: Vec<Value> = serde_json::from_str(trailing.lines().next().unwrap()).unwrap();
         if stable {
-            let mut entry = source["code.txt"].clone();
-            assert!(entry["text"].is_string(), "{entry}");
+            assert_eq!(source.len(), 1, "one file a line");
+            let entry: Value = serde_json::from_str(
+                lines
+                    .next()
+                    .unwrap()
+                    .strip_prefix("Entity dossier: ")
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(entry["file"], "code.txt");
             assert!(
                 trailing.iter().all(|listed| listed["file"] != "code.txt"),
                 "{trailing:?}"
             );
-            // Everything the block would have shown of it, its policy too.
-            entry.as_object_mut().unwrap().remove("text");
-            entry["file"] = json!("code.txt");
-            embedded.push(entry);
+            beside.push(entry);
         } else {
-            assert!(source["code.txt"].is_string());
             let listed = trailing
                 .iter()
                 .find(|listed| listed["file"] == "code.txt")
                 .unwrap();
-            assert!(listed["dossier"].as_str().unwrap().starts_with(dossier));
+            assert!(listed["dossier"]
+                .as_str()
+                .unwrap()
+                .starts_with("COMPLETE_DOSSIER_FOR_code.txt"));
             assert!(listed["policy"].is_object(), "{listed}");
             assert_eq!(
-                embedded,
+                beside,
                 std::slice::from_ref(listed),
                 "the same entry either way"
             );

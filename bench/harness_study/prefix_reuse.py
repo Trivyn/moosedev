@@ -173,13 +173,10 @@ def full_source(request):
         return frozenset(request["source_full"])
     prompt = request.get("prompt") or ""
     at = prompt.find("Current source, refreshed")
-    if at < 0:
+    if at < 0 or "\n" not in prompt[at:]:
         return frozenset()
-    line = prompt[at:].split("\n", 2)[1] if prompt[at:].count("\n") >= 1 else ""
-    try:
-        return frozenset(json.loads(line))
-    except ValueError:
-        return frozenset()
+    parsed = source_lines(prompt[at:].split("\n", 1)[1])
+    return frozenset(parsed[0]) if parsed else frozenset()
 
 
 def working_set(request):
@@ -316,39 +313,57 @@ def report(task, move=None):
 LEDGER_REBUILD_SECTIONS = ("preamble", "role and guidance", "project rules", "action meanings",
                            "objective", "accepted knowledge", "entity dossiers")
 SOURCE_HEADER = "Current source, refreshed before this action:\n"
+DOSSIER_LINE = "Entity dossier: "
+
+
+def source_lines(body):
+    """The text after the source header as ({file: full text}, {file: dossier
+    entry}, the rest): one source object, or (the stable head) one object a
+    line, each optionally followed by its dossier line. A value that is an
+    object (3fd84d7's journals) is a file's text with its dossier entry.
+    None when it is not in the shape the harness writes."""
+    full, dossiers, lines = {}, {}, body.split("\n")
+    taken = 0
+    for line in lines:
+        try:
+            if line.startswith("{"):
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    return None
+                for file, text in value.items():
+                    if isinstance(text, dict) and "text" in text:
+                        dossiers[file] = {"file": file, **{k: v for k, v in text.items() if k != "text"}}
+                        text = text["text"]
+                    full[file] = text
+            elif line.startswith(DOSSIER_LINE) and taken:
+                entry = json.loads(line[len(DOSSIER_LINE):])
+                dossiers[entry["file"]] = entry
+            else:
+                break
+        except (ValueError, KeyError, TypeError):
+            return None
+        taken += 1
+    if not taken:
+        return None
+    return full, dossiers, "\n".join(lines[taken:])
 
 
 def source_parts(text):
     """The source section as ({file: full text}, outlines text); None when the
-    section is not in the shape the harness writes. A file that carries its
-    entity dossier in its entry (the stable head) gives its text alone."""
+    section is not in the shape the harness writes."""
     if not text.startswith(SOURCE_HEADER):
         return None
-    line, _, outlines = text[len(SOURCE_HEADER):].partition("\n")
-    try:
-        full = json.loads(line)
-    except ValueError:
-        return None
-    if not isinstance(full, dict):
-        return None
-    return {file: value["text"] if isinstance(value, dict) else value
-            for file, value in full.items()}, outlines
+    parsed = source_lines(text[len(SOURCE_HEADER):])
+    return (parsed[0], parsed[2]) if parsed else None
 
 
 def source_dossiers(text):
-    """The dossier entries (dossier and policy) carried in source entries
-    (the stable head), by file; empty when there are none or the section is
-    not the harness's."""
+    """The dossier entries on the source's dossier lines (the stable head),
+    by file; empty when there are none or the section is not the harness's."""
     if not text.startswith(SOURCE_HEADER):
         return {}
-    try:
-        full = json.loads(text[len(SOURCE_HEADER):].partition("\n")[0])
-    except ValueError:
-        return {}
-    if not isinstance(full, dict):
-        return {}
-    return {file: {key: v for key, v in value.items() if key != "text"}
-            for file, value in full.items() if isinstance(value, dict)}
+    parsed = source_lines(text[len(SOURCE_HEADER):])
+    return parsed[1] if parsed else {}
 
 
 def new_lines(before, after):

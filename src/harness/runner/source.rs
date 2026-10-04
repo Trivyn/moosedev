@@ -39,6 +39,18 @@ impl Tier {
     }
 }
 
+/// Opens the line after a source line that carries its file's entity dossier
+/// (the stable head).
+pub(super) const DOSSIER_LINE: &str = "\nEntity dossier: ";
+
+/// The most the one-line-a-file layout adds over the one-object layout: two
+/// braces a file (each line its own object, the separating comma now a
+/// newline), and each dossier line's opening (its entry is the same bytes,
+/// and leaves the dossiers block no longer than before).
+pub(super) fn per_line_framing(files: usize, dossiers: usize) -> usize {
+    2 * files + DOSSIER_LINE.len() * dossiers
+}
+
 /// One working-set file as the prompt could show it.
 pub(super) struct SourceBlock {
     pub file: String,
@@ -62,7 +74,9 @@ pub(super) struct Placed {
 /// What one prompt shows of the working set.
 #[derive(Debug)]
 pub(super) struct SourceView {
-    /// The files shown in full as a JSON object, the `Current source` line.
+    /// The files shown in full as a JSON object, the `Current source` line;
+    /// with dossiers (the stable head), one `{file: text}` object a line,
+    /// each followed by its entity dossier line ([`DOSSIER_LINE`]).
     pub full_json: String,
     /// The outlines section; empty when every file is shown in full.
     pub outlines: String,
@@ -72,7 +86,7 @@ pub(super) struct SourceView {
     /// Files outlined here that the previous prompt showed in full; the
     /// outlines section names them (see [`swap_notice`]).
     pub swapped: Vec<String>,
-    /// Files shown in full whose entity dossier rides in their entry.
+    /// Files shown in full whose entity dossier line follows their source.
     pub embedded: BTreeSet<String>,
 }
 
@@ -402,12 +416,11 @@ impl Runner {
     /// budget does not undo it. Errs when the file the model just read or
     /// edited cannot fit even alone.
     ///
-    /// `dossiers` maps a file to its dossier entry without the file, as a
-    /// JSON object (`{"dossier":…,"policy":…}`). A file shown in full that
-    /// has one carries it in its entry, `{"text":…,"dossier":…,…}`, so an
-    /// edit changes the prompt from that file's entry onward and no further
-    /// dossier with it. The framing is never larger than the dossier's own
-    /// list entry, which the caller counts as protected.
+    /// With `dossiers` (a file's dossier entry as the dossiers block shows
+    /// it), each file shown in full is its own `{file: text}` line, followed
+    /// by its dossier line when it has one, so an edit changes the prompt
+    /// from that file's line onward and no further dossier with it. The
+    /// caller counts the extra framing ([`per_line_framing`]) as protected.
     pub(super) fn source_view(
         &self,
         blocks: &[SourceBlock],
@@ -542,26 +555,30 @@ impl Runner {
         let entries: Vec<String> = full
             .iter()
             .map(|(file, text)| {
-                let text = serde_json::to_string(text).unwrap_or_default();
-                let fields = dossiers
-                    .and_then(|dossiers| dossiers.get(*file))
-                    .and_then(|entry| entry.strip_prefix('{'))
-                    .filter(|fields| *fields != "}");
-                let value = match fields {
-                    Some(fields) => {
-                        embedded.insert((*file).to_string());
-                        format!("{{\"text\":{text},{fields}")
-                    }
-                    None => text,
-                };
                 format!(
-                    "{}:{value}",
-                    serde_json::to_string(file).unwrap_or_default()
+                    "{}:{}",
+                    serde_json::to_string(file).unwrap_or_default(),
+                    serde_json::to_string(text).unwrap_or_default()
                 )
             })
             .collect();
+        let full_json = match dossiers {
+            Some(dossiers) if !entries.is_empty() => full
+                .iter()
+                .zip(&entries)
+                .map(|((file, _), entry)| match dossiers.get(*file) {
+                    Some(dossier) => {
+                        embedded.insert((*file).to_string());
+                        format!("{{{entry}}}{DOSSIER_LINE}{dossier}")
+                    }
+                    None => format!("{{{entry}}}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => format!("{{{}}}", entries.join(",")),
+        };
         Ok(SourceView {
-            full_json: format!("{{{}}}", entries.join(",")),
+            full_json,
             outlines,
             placed,
             budget,
@@ -611,16 +628,22 @@ mod tests {
         (runner, server)
     }
 
+    /// The files a prompt shows in full: its one source object, or (the
+    /// stable head) its source lines, dossier lines aside.
     fn full_files(prompt: &str) -> Vec<String> {
-        let line = prompt
+        let mut full = BTreeSet::new();
+        for line in prompt
             .split_once("Current source, refreshed before this action:\n")
             .unwrap()
             .1
             .lines()
-            .next()
-            .unwrap();
-        let full: BTreeMap<String, serde_json::Value> = serde_json::from_str(line).unwrap();
-        full.into_keys().collect()
+            .take_while(|line| line.starts_with('{') || line.starts_with("Entity dossier: "))
+            .filter(|line| line.starts_with('{'))
+        {
+            let files: BTreeMap<String, Option<String>> = serde_json::from_str(line).unwrap();
+            full.extend(files.into_keys());
+        }
+        full.into_iter().collect()
     }
 
     fn shared_prefix(left: &str, right: &str) -> usize {
