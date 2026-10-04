@@ -124,6 +124,9 @@ pub struct Runner {
     /// past the daemon's fixed floor: its refreshes ask for the floor alone
     /// and retrieved claims are not filled in. Cleared at every advance.
     rule_claims_floor_only: bool,
+    /// The rules snapshot the last built prompt took, committed to the task
+    /// once its request is sent ([`Self::commit_rules_snapshot`]).
+    pending_rules: std::sync::Mutex<Option<symbolic::RulesSnapshot>>,
     /// Set by `configure_provider`; a runner nobody configured runs no
     /// language server.
     language_settings: Option<crate::harness::startup::LanguageSettings>,
@@ -434,6 +437,7 @@ impl Runner {
             streaming: None,
             last_saved: Mutex::new(None),
             rule_claims_floor_only: false,
+            pending_rules: Default::default(),
             language_settings: None,
             language: Default::default(),
             source_budget: None,
@@ -496,6 +500,7 @@ impl Runner {
             streaming: None,
             last_saved: Mutex::new(None),
             rule_claims_floor_only: false,
+            pending_rules: Default::default(),
             language_settings: None,
             language: Default::default(),
             source_budget: None,

@@ -18,6 +18,15 @@ pub const FRUITLESS_SEARCH_LIMIT: usize = 2;
 
 pub(super) const CAPTURE_NOTE_QUESTION: &str = "The coding work is done and its required checks passed. Answer one plain question in prose, no JSON structure beyond the single note field: what should a future engineer know about this change that the diff alone does not say? Name the decision you made and why, any rule you discovered, and anything that surprised you. Say \"nothing beyond the diff\" if there is nothing durable. Do not restate the objective.";
 
+/// The rendered project rules of one cycle (mode and approved revision) and
+/// each rule's entry by IRI, so a later step can say which entries changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesSnapshot {
+    pub cycle: String,
+    pub text: String,
+    pub entries: Vec<(String, String)>,
+}
+
 /// Durable derived state. Obligations are re-derived at every plan approval;
 /// the counters bound autonomous recoveries for the whole task.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -161,6 +170,12 @@ pub struct SymbolicState {
     /// play open ([`Runner::spec_deferral_return`]).
     #[serde(default)]
     pub spec_deferral_returns: usize,
+    /// The project rules as this planning or approval cycle first showed
+    /// them, reused byte for byte in the prompt head so the model server's
+    /// prefix cache survives a rule changing mid-cycle; the change goes to the
+    /// tail ([`RulesSnapshot`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_snapshot: Option<RulesSnapshot>,
     /// Digests of (file, grounding keys) whose grounding note was delivered;
     /// the same edit proposed again goes through.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]

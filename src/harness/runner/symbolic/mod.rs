@@ -23,8 +23,8 @@ use super::{Mode, PendingEdit, Phase, Progress, Runner};
 use crate::harness::protocol::CheckOutcome;
 use anyhow::Result;
 pub use state::{
-    CaptureNoteState, FailedRun, SymbolicAssociation, SymbolicState, FRUITLESS_SEARCH_LIMIT,
-    MAX_RETYPES, MAX_SCOPE_ESCAPES,
+    CaptureNoteState, FailedRun, RulesSnapshot, SymbolicAssociation, SymbolicState,
+    FRUITLESS_SEARCH_LIMIT, MAX_RETYPES, MAX_SCOPE_ESCAPES,
 };
 use state::{NoteAnswer, CAPTURE_NOTE_QUESTION};
 

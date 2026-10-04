@@ -26,12 +26,17 @@ fn rule(iri: &str, label: &str, kind: &str) -> GoverningRule {
 /// note.
 fn step_prompt(entry: &Value) -> &str {
     let request = entry["prompt"].as_str().unwrap();
+    // The schema counts as appended only after the step's last result; the
+    // stable head carries it in the head instead.
+    let last = request.rfind("Last result:\n").unwrap_or(0);
     let end = [
-        "\nRequired JSON schema:\n",
-        "\nYour last candidate was rejected:",
+        request[last..]
+            .find("\nRequired JSON schema:\n")
+            .map(|at| last + at),
+        request.find("\nYour last candidate was rejected:"),
     ]
-    .iter()
-    .filter_map(|marker| request.find(marker))
+    .into_iter()
+    .flatten()
     .min()
     .unwrap_or(request.len());
     &request[..end]
@@ -44,6 +49,8 @@ fn rules_section(prompt: &str) -> &str {
         return "";
     };
     let end = [
+        // The stable head places the output schema right after the rules.
+        "\nRequired JSON schema:\n",
         "Return one JSON object",
         "Return exactly one JSON action.",
         "Call exactly one tool",
@@ -97,6 +104,7 @@ fn assert_receipts(runner: &Runner) -> Vec<Value> {
         );
         let sections: u64 = [
             "head_bytes",
+            "knowledge_bytes",
             "navigation_bytes",
             "observations_bytes",
             "state_bytes",
@@ -161,9 +169,10 @@ async fn every_step_action_request_carries_its_context_plan() {
     assert_eq!(requests[2]["attempt"], 2);
 
     let plans = assert_receipts(&runner);
-    // Under the json_schema contract every request appends the schema; only
-    // the repair appends the rejection note, and its receipt counts it.
-    assert!(plans.iter().all(|plan| usize_at(plan, "schema_bytes") > 0));
+    // Under the json_schema contract the stable head carries the schema in
+    // the head, so nothing is appended for it; only the repair appends the
+    // rejection note, and its receipt counts it.
+    assert!(plans.iter().all(|plan| usize_at(plan, "schema_bytes") == 0));
     assert_eq!(usize_at(&plans[1], "repair_bytes"), 0);
     assert!(usize_at(&plans[2], "repair_bytes") > 0, "{}", plans[2]);
     let rules = &plans[0]["rules"];

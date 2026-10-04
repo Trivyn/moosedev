@@ -2730,8 +2730,10 @@ async fn the_plan_is_shown_above_the_source_and_the_changing_state() {
     let plan = at("\nPlan: {");
     let source = at("Current source, refreshed");
     let state = at("Current harness state");
+    // The accepted knowledge follows the source in the stable head: it
+    // depends on the step's target files.
     assert!(
-        knowledge < plan && plan < source && source < state,
+        plan < source && source < knowledge && knowledge < state,
         "knowledge {knowledge}, plan {plan}, source {source}, state {state}"
     );
     assert!(prompt[state..].find("\nPlan: ").is_none(), "shown once");
@@ -2757,9 +2759,46 @@ async fn the_prompt_keeps_the_source_ahead_of_the_dossiers() {
     let dossiers = at("\nEntity dossiers:\n");
     let state = at("Current harness state");
     assert!(
-        knowledge < source && source < dossiers && dossiers < state,
+        source < dossiers && dossiers < knowledge && knowledge < state,
         "knowledge {knowledge}, source {source}, dossiers {dossiers}, state {state}"
     );
+}
+
+/// The stable head keeps what changes mid-cycle out of the prompt's start:
+/// the output schema follows the rules, the knowledge follows the source.
+/// Switched off, the earlier order: knowledge in the head, the schema last.
+#[tokio::test]
+async fn the_stable_head_moves_the_schema_up_and_the_knowledge_down() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    for stable in [true, false] {
+        if !stable {
+            std::env::set_var("MOOSEDEV_HARNESS_STABLE_HEAD", "off");
+        }
+        let fixture = Fixture::new().await;
+        let mut runner = fixture
+            .approved_interactive_with(ActionContract::JsonSchema)
+            .await;
+        fixture.conversational(json!({"action":"read","file":"code.txt"}));
+        runner.advance().await.unwrap();
+        std::env::remove_var("MOOSEDEV_HARNESS_STABLE_HEAD");
+        let prompt = fixture.last_model_prompt("harness_action");
+        let at = |marker: &str| prompt.find(marker).unwrap();
+        let schema = at("\nRequired JSON schema:\n");
+        let knowledge = at("Current accepted knowledge:");
+        let source = at("Current source, refreshed");
+        let last = prompt.rfind("Last result:\n").unwrap();
+        if stable {
+            assert!(
+                schema < source && source < knowledge,
+                "schema {schema}, source {source}, knowledge {knowledge}"
+            );
+        } else {
+            assert!(
+                knowledge < source && last < schema,
+                "knowledge {knowledge}, source {source}, last {last}, schema {schema}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -5001,4 +5040,48 @@ async fn editing_an_approved_spec_is_journaled_and_named_at_completion() {
         ),
         "{complete}"
     );
+}
+
+/// The project rules a cycle first showed stay in the prompt head byte for
+/// byte; a rule that arrives mid-cycle goes to the tail, so the model
+/// server's prefix cache keeps the head (cafe runs: rule changes caused half
+/// of all re-read prompt bytes). Switched off, the head is rendered afresh.
+#[tokio::test]
+async fn a_rule_arriving_mid_cycle_goes_to_the_tail_and_the_head_stays() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    for stable in [true, false] {
+        if !stable {
+            std::env::set_var("MOOSEDEV_HARNESS_STABLE_HEAD", "off");
+        }
+        let fixture = Fixture::new().await;
+        let mut runner = fixture.approved_interactive().await;
+        // After approval: a plan that left a rule unmentioned would be returned.
+        fixture.shared.lock().unwrap().governing_rules = coverage_rules()[..1].to_vec();
+        fixture.conversational(json!({"action":"reply","message":"Working.","then":"continue"}));
+        runner.advance().await.unwrap();
+        let first = fixture.last_model_prompt("harness_action");
+        fixture.shared.lock().unwrap().governing_rules = coverage_rules();
+        fixture.conversational(json!({"action":"reply","message":"Still working.","then":"wait"}));
+        runner.advance().await.unwrap();
+        std::env::remove_var("MOOSEDEV_HARNESS_STABLE_HEAD");
+        let second = fixture.last_model_prompt("harness_action");
+        let added = "Every transfer writes an audit entry";
+        let source = second.find("Current source, refreshed").unwrap();
+        if stable {
+            let head = &first[..first.find("Current source, refreshed").unwrap()];
+            assert!(second.starts_with(head), "the head changed");
+            assert!(
+                !second[..source].contains(added),
+                "the new rule is in the head"
+            );
+            let tail = &second[second.find("Current harness state").unwrap()..];
+            assert!(
+                tail.contains("Project rules changed since the rules above were shown")
+                    && tail.contains(added),
+                "{tail}"
+            );
+        } else {
+            assert!(second[..source].contains(added));
+        }
+    }
 }

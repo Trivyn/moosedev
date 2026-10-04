@@ -162,26 +162,11 @@ fn project_rules(rules: &[GoverningRule], states: &[RuleState]) -> (String, Rule
         if state.is_settled() {
             *receipt.settled.entry(state.name()).or_default() += 1;
         }
-        let shown = if let Some(note) = state
-            .note()
-            .filter(|_| rule.kind.eq_ignore_ascii_case("Requirement"))
-        {
-            let via = if rule.via.trim().is_empty() {
-                String::new()
-            } else {
-                format!("; {}", rule.via)
-            };
-            out.push_str(&format!(
-                "\n[{}] {} ({}) — {note}{via}\n",
-                rule.kind, rule.label, rule.iri
-            ));
+        out.push_str(&rule_entry(rule, state));
+        let shown = if is_one_line(rule, state) {
             one_line += 1;
             &mut receipt.one_line
         } else {
-            out.push_str(&format!(
-                "\n[{}] {} ({})\n{}\n{}",
-                rule.kind, rule.label, rule.iri, rule.via, rule.claim
-            ));
             if rule.claim.trim().is_empty() {
                 *unclaimed.entry(rule.kind.as_str()).or_default() += 1;
                 &mut receipt.title_only
@@ -209,6 +194,84 @@ fn project_rules(rules: &[GoverningRule], states: &[RuleState]) -> (String, Rule
     }
     receipt.bytes = out.len();
     (out, receipt)
+}
+
+/// Whether a rule is shown as one line: a settled Requirement.
+fn is_one_line(rule: &GoverningRule, state: &RuleState) -> bool {
+    state.note().is_some() && rule.kind.eq_ignore_ascii_case("Requirement")
+}
+
+/// One rule's entry in the Project rules block.
+fn rule_entry(rule: &GoverningRule, state: &RuleState) -> String {
+    match state
+        .note()
+        .filter(|_| rule.kind.eq_ignore_ascii_case("Requirement"))
+    {
+        Some(note) => {
+            let via = if rule.via.trim().is_empty() {
+                String::new()
+            } else {
+                format!("; {}", rule.via)
+            };
+            format!(
+                "\n[{}] {} ({}) — {note}{via}\n",
+                rule.kind, rule.label, rule.iri
+            )
+        }
+        None => format!(
+            "\n[{}] {} ({})\n{}\n{}",
+            rule.kind, rule.label, rule.iri, rule.via, rule.claim
+        ),
+    }
+}
+
+/// The largest tail a cycle's rule changes may take before the head's rules
+/// are rendered afresh: past it, re-reading the head once is cheaper than
+/// carrying the changes on every step.
+const RULES_DELTA_LIMIT: usize = 4_000;
+
+/// `MOOSEDEV_HARNESS_STABLE_HEAD=off` builds the step prompt in the earlier
+/// order: rules rendered afresh every step, knowledge in the head, the fix
+/// paragraph with the instructions, the schema after everything.
+pub(super) fn stable_head_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_STABLE_HEAD").map_or(true, |value| value.trim() != "off")
+}
+
+/// The rules entries of `fresh` that differ from `snapshot`'s, and the rules
+/// it no longer lists, as a tail section; empty when nothing changed.
+fn rules_delta(snapshot: &symbolic::RulesSnapshot, fresh: &[(String, String)]) -> String {
+    let old: BTreeMap<&str, &str> = snapshot
+        .entries
+        .iter()
+        .map(|(iri, entry)| (iri.as_str(), entry.as_str()))
+        .collect();
+    let mut changed = String::new();
+    for (iri, entry) in fresh {
+        if old.get(iri.as_str()) != Some(&entry.as_str()) {
+            changed.push_str(entry);
+        }
+    }
+    let now: BTreeSet<&str> = fresh.iter().map(|(iri, _)| iri.as_str()).collect();
+    let gone: Vec<&str> = snapshot
+        .entries
+        .iter()
+        .filter(|(iri, _)| !now.contains(iri.as_str()))
+        .map(|(_, entry)| entry.trim().lines().next().unwrap_or_default())
+        .collect();
+    if changed.is_empty() && gone.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\nProject rules changed since the rules above were shown (these entries replace theirs):",
+    );
+    out.push_str(&changed);
+    if !gone.is_empty() {
+        out.push_str(&format!(
+            "\nNo longer governing this step: {}\n",
+            gone.join("; ")
+        ));
+    }
+    out
 }
 
 /// A recency echo of the open rule titles for the planning step; the
@@ -400,6 +463,9 @@ pub(super) fn prompt_limit(config: &LlmConfig, cap: usize) -> usize {
 struct Mandatory {
     head: String,
     source_text: String,
+    /// The accepted knowledge, after the source in the stable head; empty
+    /// when it is in `head`.
+    knowledge: String,
     state: String,
     /// Bytes left after it and the output schema.
     remaining: usize,
@@ -895,6 +961,10 @@ impl Runner {
                     .checked_add(serde_json::to_vec(definitions)?.len())
                     .context("model tool request byte count overflow")?,
             ),
+            // The stable head carries the action schema already.
+            None if name == "harness_action" && stable_head_enabled() => {
+                (prompt.to_owned(), prompt.len())
+            }
             None => {
                 let bytes = json_request_bytes(prompt, &schema)?;
                 let request = format!(
@@ -1446,12 +1516,78 @@ impl Runner {
         // Where each rule stands, once for the rules and the planning echo;
         // a proposed plan settles nothing.
         let states = self.settlement(&[]).states(&context.governing_rules);
-        let (rules, rules_receipt) = project_rules(
-            &self.rules_with_retrieved_claims(&context.governing_rules),
-            &states,
+        let shown_rules = self.rules_with_retrieved_claims(&context.governing_rules);
+        let (fresh_rules, mut rules_receipt) = project_rules(&shown_rules, &states);
+        let stable = stable_head_enabled();
+        let cycle = format!(
+            "{:?}|{}",
+            self.task.mode,
+            self.task.approved_revision.clone().unwrap_or_default()
         );
+        let snapshot = self
+            .task
+            .symbolic
+            .as_ref()
+            .and_then(|state| state.rules_snapshot.as_ref())
+            .filter(|snapshot| snapshot.cycle == cycle);
+        // The cycle's first rendering stays in the head byte for byte; what
+        // changes after it goes to the tail, until that outgrows a re-read.
+        // With no rules at all, none are shown: a block that no longer
+        // governs would mislead. The cycle keeps an empty snapshot, so rules
+        // that return later in it arrive in the tail.
+        let (rules, rules_delta) = if stable && fresh_rules.is_empty() {
+            *self.pending_rules.lock().expect("rules snapshot lock") = snapshot
+                .filter(|snapshot| !snapshot.entries.is_empty())
+                .map(|_| symbolic::RulesSnapshot {
+                    cycle: cycle.clone(),
+                    text: String::new(),
+                    entries: Vec::new(),
+                });
+            (String::new(), String::new())
+        } else if stable {
+            let entries: Vec<(String, String)> = shown_rules
+                .iter()
+                .zip(&states)
+                .map(|(rule, state)| (rule.iri.clone(), rule_entry(rule, state)))
+                .collect();
+            let kept = snapshot
+                .map(|snapshot| (snapshot.text.clone(), rules_delta(snapshot, &entries)))
+                .filter(|(_, delta)| delta.len() <= RULES_DELTA_LIMIT);
+            match kept {
+                Some(kept) => {
+                    *self.pending_rules.lock().expect("rules snapshot lock") = None;
+                    kept
+                }
+                None => {
+                    *self.pending_rules.lock().expect("rules snapshot lock") =
+                        Some(symbolic::RulesSnapshot {
+                            cycle,
+                            text: fresh_rules.clone(),
+                            entries,
+                        });
+                    (fresh_rules, String::new())
+                }
+            }
+        } else {
+            *self.pending_rules.lock().expect("rules snapshot lock") = None;
+            (fresh_rules, String::new())
+        };
+        // The counts describe the rules as they stand; the bytes, the block
+        // the head shows.
+        rules_receipt.bytes = rules.len();
         prompt.push_str(&rules);
         let contract = self.action_contract();
+        // The output schema after the rules, in the stable head, rather than
+        // after the state that changes every step (3.4 KB re-read a step over
+        // the cafe runs); the request then appends none ([`Self::model_json`]).
+        let schema = self.action_schema();
+        let schema_in_head = stable && contract == ActionContract::JsonSchema;
+        if schema_in_head {
+            prompt.push_str(&format!(
+                "{JSON_SCHEMA_MARKER}{}\n",
+                serde_json::to_string(&schema)?
+            ));
+        }
         prompt.push_str(match (contract, self.task.batch_capture) {
             (ActionContract::Tools, true) => TOOLS_CONVERSATIONAL_OUTPUT,
             (ActionContract::Tools, false) => TOOLS_SINGLE_ACTION_OUTPUT,
@@ -1460,11 +1596,20 @@ impl Runner {
         });
         prompt.push_str(&action_meanings());
         let fixes = self.fixes_offerable();
-        if fixes {
+        // In the stable head the fix paragraph goes with the actions it
+        // describes, in the tail: it comes and goes with the language server.
+        if fixes && !stable {
             prompt.push_str(FIX_MEANING);
         }
         prompt.push_str(JOB);
-        let dossiers = serde_json::to_string(&context.files)?;
+        // In path order: the daemon's order varies between refreshes.
+        let dossiers = if stable {
+            let mut files = context.files.clone();
+            files.sort_by(|a, b| a.file.cmp(&b.file));
+            serde_json::to_string(&files)?
+        } else {
+            serde_json::to_string(&context.files)?
+        };
         // The plan with its summary as this step is shown it; files, checks
         // and addresses are always complete. It sits with the knowledge, above
         // the source: it changes when a plan is proposed or approved, while the
@@ -1474,10 +1619,22 @@ impl Runner {
         // Replanning approved work, the planner amends the approved plan and
         // sees it whole (bounded), so it does not page it from the journal.
         let amending = self.amending_approved_plan();
-        prompt.push_str(&format!(
-            "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",
-            config.model, self.task.objective, context.context,
-        ));
+        // In the stable head the accepted knowledge follows the source: it
+        // depends on the step's target files, and in the head every change
+        // cost the whole prompt after it (15% of re-read bytes, cafe runs).
+        let knowledge = if stable {
+            prompt.push_str(&format!(
+                "\nConfigured model ID: {}\nCurrent human objective: {}\n",
+                config.model, self.task.objective,
+            ));
+            format!("Current accepted knowledge:\n{}\n", context.context)
+        } else {
+            prompt.push_str(&format!(
+                "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",
+                config.model, self.task.objective, context.context,
+            ));
+            String::new()
+        };
         // The Plan line, ending the head, for a given summary view. Chosen
         // below, once the rest of the protected prompt is known.
         let plan_line = |summary: Option<String>| -> Result<String> {
@@ -1546,6 +1703,7 @@ impl Runner {
             self.task.guidance, self.task.mode, self.task.phase,
             serde_json::to_string(&self.task.read_files)?, serde_json::to_string(&edited)?,
         );
+        state.push_str(&rules_delta);
         state.push_str(&self.unwritten_line());
         if let Some(diagnostics) = &self.task.diagnostics {
             state.push_str(&diagnostics.render(super::dispatch::DIAGNOSTICS_BYTES));
@@ -1554,6 +1712,9 @@ impl Runner {
             "Required check results (indices into plan checks): {}\n",
             serde_json::to_string(&checks)?
         ));
+        if fixes && stable {
+            state.push_str(FIX_MEANING);
+        }
         state.push_str(&match (self.task.mode, self.narrowed_files()) {
             (Mode::Plan, _) => PLAN_MODE_ACTIONS.to_owned(),
             (Mode::Auto, Some(files)) => narrowed_actions(files),
@@ -1565,9 +1726,10 @@ impl Runner {
         // Count the complete mandatory prompt and output schema first. Discovery
         // and historical prose spend only the remainder; governing claims and
         // file dossiers are never clipped to accommodate a directory listing.
-        let schema = self.action_schema();
+        // Under the stable head the schema is already in `prompt`.
         let schema_bytes = match contract {
             ActionContract::Tools => serde_json::to_string(&tools::definitions(&schema))?.len(),
+            ActionContract::JsonSchema if schema_in_head => 0,
             ActionContract::JsonSchema => {
                 JSON_SCHEMA_MARKER.len() + serde_json::to_string(&schema)?.len()
             }
@@ -1577,8 +1739,12 @@ impl Runner {
         // Every file is at least outlined, so all outlines are protected.
         let blocks = self.source_blocks();
         let outlines = protected_source(&blocks) + self.scope_note().len();
-        let rest =
-            SOURCE_HEADER.len() + "{}\n".len() + dossier_block.len() + state.len() + schema_bytes;
+        let rest = SOURCE_HEADER.len()
+            + "{}\n".len()
+            + dossier_block.len()
+            + knowledge.len()
+            + state.len()
+            + schema_bytes;
         // The whole plan only while the source keeps its whole share beside
         // it and the observation floor: its extra bytes then come out of the
         // optional sections, never out of source, and cannot overflow a
@@ -1631,10 +1797,12 @@ impl Runner {
             "{SOURCE_HEADER}{}\n{}{dossier_block}",
             source.full_json, source.outlines
         );
-        let required = prompt.len() + source_text.len() + state.len() + schema_bytes;
+        let required =
+            prompt.len() + source_text.len() + knowledge.len() + state.len() + schema_bytes;
         Ok(Mandatory {
             head: prompt,
             source_text,
+            knowledge,
             state,
             remaining: limit.saturating_sub(required),
             source,
@@ -1859,6 +2027,7 @@ impl Runner {
         let Mandatory {
             head,
             source_text,
+            knowledge,
             state,
             mut remaining,
             source,
@@ -1921,6 +2090,7 @@ impl Runner {
         let head_bytes = head.len();
         let mut prompt = head;
         prompt.push_str(&source_text);
+        prompt.push_str(&knowledge);
         prompt.push_str(&navigation);
         prompt.push_str(&history);
         prompt.push_str(&state);
@@ -1938,6 +2108,7 @@ impl Runner {
             navigation_bytes: navigation.len(),
             observations_bytes: observations.len(),
             head_bytes,
+            knowledge_bytes: knowledge.len(),
             state_bytes: state.len(),
             // What the request appends is added when it is sent.
             schema_bytes: 0,
@@ -1946,6 +2117,19 @@ impl Runner {
             budget: self.prompt_budget()?,
         };
         Ok((prompt, source, plan))
+    }
+
+    /// Keep the rules snapshot the prompt just built took as this cycle's,
+    /// so the next step's head repeats it.
+    pub(super) fn commit_rules_snapshot(&mut self) {
+        let pending = self
+            .pending_rules
+            .lock()
+            .expect("rules snapshot lock")
+            .take();
+        if let Some(snapshot) = pending {
+            self.symbolic_state_mut().rules_snapshot = Some(snapshot);
+        }
     }
 
     pub(super) fn preserve_stream(&mut self) {

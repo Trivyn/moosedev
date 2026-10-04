@@ -422,6 +422,7 @@ impl Runner {
             }
             built => built?,
         };
+        self.commit_rules_snapshot();
         if !source.swapped.is_empty() {
             let total: usize = self.task.source.values().flatten().map(String::len).sum();
             self.intent_event(
