@@ -563,7 +563,17 @@ impl Runner {
                 // A query already asked in this task returns the same records;
                 // answer from the stored result rather than spending a daemon
                 // round trip on it again.
-                if let Some(answer) = self.repeat_search_answer(&query) {
+                let next = if !search_park_enabled() {
+                    "use a different action."
+                } else if self.task.mode == Mode::Plan {
+                    "propose the plan, or ask the human with question."
+                } else {
+                    "edit, run a check, or finish if the work is done."
+                };
+                if let Some(answer) = self.repeat_search_answer(&query, next) {
+                    if self.park_repeated_search(&query) {
+                        return self.persist();
+                    }
                     self.task.last_response = answer.clone();
                     self.knowledge_event(answer);
                     return self.persist();
@@ -1320,6 +1330,14 @@ pub(super) const DIAGNOSTICS_BYTES: usize = 4_000;
 
 /// How a refused repeat inspect begins, in the journal and the Last result.
 const INSPECT_REFUSED: &str = "Not shown again: inspect of";
+/// Journals a search repeat that parked the task.
+const SEARCH_REPEAT_PARKED: &str = "Search repeated after its stored answer:";
+
+/// `MOOSEDEV_HARNESS_SEARCH_PARK=off` keeps answering a repeated search
+/// from its stored result without ever parking.
+fn search_park_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_SEARCH_PARK").map_or(true, |value| value.trim() != "off")
+}
 pub(super) const READ_REFUSED: &str = "Not read again:";
 
 /// Whether an inspect of a page that has left the prompt is served again
@@ -1586,6 +1604,92 @@ impl Runner {
                 || message.starts_with("Task permission")
         });
         (!changed).then_some(last)
+    }
+
+    /// The searches answered from their stored result since the last
+    /// progress (a human answer, an applied edit or a proposed plan), each
+    /// with how many times, in the order first searched. Each query's stored
+    /// answers are matched by their whole opening, never parsed out of the
+    /// text, so a query holding the answer's own words cannot be misread.
+    fn repeated_searches(&self) -> Vec<(String, usize)> {
+        let start = self
+            .task
+            .events
+            .iter()
+            .rposition(|event| {
+                let message = event.message.as_str();
+                review::is_human_progress(message)
+                    || message.starts_with("Applied edit")
+                    || message.starts_with("Proposed plan: ")
+            })
+            .map_or(0, |progress| progress + 1);
+        let stretch = &self.task.events[start..];
+        let mut repeats: Vec<(String, usize)> = Vec::new();
+        for search in &self.task.knowledge_searches {
+            if repeats.iter().any(|(seen, _)| *seen == search.query) {
+                continue;
+            }
+            let opening = format!(
+                "{} '{}' in this task; it returned ",
+                symbolic::SEARCH_REPEATED,
+                search.query
+            );
+            let count = stretch
+                .iter()
+                .filter(|event| event.message.starts_with(&opening))
+                .count();
+            if count > 0 {
+                repeats.push((search.query.clone(), count));
+            }
+        }
+        repeats
+    }
+
+    /// A search asked again after its stored result was already repeated
+    /// once since the last progress parks the task for the human, as a
+    /// repeated read, page or command does (gate audit invariant I1: every
+    /// refusal has a way out). Before, the stored answer never escalated:
+    /// simH1 prompt 2 searched four queries 211 times in Planning without a
+    /// plan, and Qwen3.5-9B repeated one search 60 times (Lesson cb5cbfb0).
+    /// While a required check fails, the steer before a park comes first.
+    /// True when the step was answered here.
+    fn park_repeated_search(&mut self, query: &str) -> bool {
+        if !search_park_enabled() {
+            return false;
+        }
+        let repeats = self.repeated_searches();
+        if !repeats.iter().any(|(seen, _)| seen == query) {
+            return false;
+        }
+        if let Some(steer) = self.steer_before_park() {
+            self.task.last_response = steer;
+            return true;
+        }
+        // Asks: the first search, each stored answer, and this one.
+        let listed = repeats
+            .iter()
+            .map(|(seen, count)| {
+                let asks = count + 1 + usize::from(seen == query);
+                format!("'{seen}' ({asks} times)")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let without = if self.task.mode == Mode::Plan {
+            "without proposing a plan"
+        } else {
+            "without editing"
+        };
+        self.intent_event("search_repeat_parked", &listed);
+        self.event(format!(
+            "{SEARCH_REPEAT_PARKED} '{query}' parked for guidance."
+        ));
+        self.task.last_response = format!(
+            "The model keeps searching for {listed} {without}; project knowledge and the repository have nothing more on them. Guidance is needed: give the missing information, say to proceed on an assumption, or /plan to change the approach."
+        );
+        self.task.phase = Phase::AwaitingInput;
+        self.task.turn_finished = true;
+        self.park_under_approved_plan();
+        true
     }
 
     /// Whether the Last result, which the prompt shows, is this page.

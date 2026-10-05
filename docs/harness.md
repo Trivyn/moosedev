@@ -1119,7 +1119,17 @@ bound keeps badciv f2fe1f61's alternation of two pages (132 times) closed; the
 refusal of pages that had left the prompt parked 3 of 6 OpenRouter replicates.
 `MOOSEDEV_HARNESS_INSPECT_RESERVE=off` refuses every repeat in the run. Each prompt states how many distinct records the graph has
 delivered so far. A byte-identical repeat of an earlier query is answered from
-the stored result without re-running it, and consecutive searches matching
+the stored result without re-running it (before any edit), with a next step
+the mode allows (propose the plan or ask in Plan mode; edit, check or finish
+while working). Asked again after that stored answer, with no human answer,
+applied edit or proposed plan between, it parks the task for the human
+(`search_repeat_parked`), naming each repeated query and how often it was
+asked; while a required check fails, the steer before a park comes first.
+Each query counts on its own, so alternating queries park too. Before, the
+stored answer never escalated: badciv-sim prompt 2 (simH1) searched four
+queries 211 times in Planning without proposing a plan.
+`MOOSEDEV_HARNESS_SEARCH_PARK=off` answers every repeat from the stored result.
+Consecutive searches matching
 nothing are counted: the second states that the channel is exhausted and names
 the actions the current mode still offers. The final checkpoint
 consumes the whole journal since the last checkpoint in one note; the checkpoint

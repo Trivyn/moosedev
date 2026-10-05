@@ -35,6 +35,10 @@ fn replan_hold_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_REPLAN_HOLD").map_or(true, |value| value.trim() != "off")
 }
 
+/// Opens the answer to a search asked again: the stored result, repeated.
+pub(in crate::harness::runner) const SEARCH_REPEATED: &str =
+    "You already searched the literal string";
+
 impl Runner {
     pub(super) fn symbolic_state_mut(&mut self) -> &mut SymbolicState {
         self.task.symbolic.get_or_insert_with(Default::default)
@@ -208,6 +212,7 @@ impl Runner {
     pub(in crate::harness::runner) fn repeat_search_answer(
         &mut self,
         query: &str,
+        next: &str,
     ) -> Option<String> {
         if !self.task.edits.is_empty() {
             return None;
@@ -239,7 +244,7 @@ impl Runner {
             format!("{records} accepted record(s) shown and {omitted} counted as omitted")
         };
         Some(format!(
-            "You already searched the literal string '{query}' in this task; it returned {delivery}, unchanged and repeated below. Searching it again cannot add anything -- use a different action.{body}"
+            "{SEARCH_REPEATED} '{query}' in this task; it returned {delivery}, unchanged and repeated below. Searching it again cannot add anything -- {next}{body}"
         ))
     }
 
@@ -640,9 +645,13 @@ mod tests {
             .unwrap();
 
         // Nothing searched yet, and a different query, are both dispatched.
-        assert!(runner.repeat_search_answer("harness").is_none());
+        assert!(runner
+            .repeat_search_answer("harness", "use a different action.")
+            .is_none());
         runner.search_knowledge("harness", None).await.unwrap();
-        assert!(runner.repeat_search_answer("harness for models").is_none());
+        assert!(runner
+            .repeat_search_answer("harness for models", "use a different action.")
+            .is_none());
 
         // Give the stored search a body, so the repeat can be checked for
         // repeating the evidence rather than only naming it.
@@ -653,7 +662,9 @@ mod tests {
         // one query was observed repeated 71 times in a single turn, so this
         // must not be bounded into giving up and looping again.
         for _ in 0..70 {
-            let answer = runner.repeat_search_answer("harness").unwrap();
+            let answer = runner
+                .repeat_search_answer("harness", "use a different action.")
+                .unwrap();
             assert!(answer.contains("You already searched"), "{answer}");
             assert!(answer.contains("use a different action"), "{answer}");
             // Skip the daemon round trip, never the records themselves.
@@ -675,7 +686,9 @@ mod tests {
             reason: "applied".into(),
             revision: "r1".into(),
         });
-        assert!(runner.repeat_search_answer("harness").is_none());
+        assert!(runner
+            .repeat_search_answer("harness", "use a different action.")
+            .is_none());
         server.abort();
     }
 

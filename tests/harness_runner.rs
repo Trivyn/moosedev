@@ -4962,6 +4962,150 @@ async fn a_repeated_query_is_answered_without_re_running_it() {
     );
 }
 
+/// A search asked again after its stored answer was already repeated parks
+/// the task for the human, as a repeated read, page or command does (gate
+/// audit invariant I1). simH1 prompt 2 searched four queries 211 times in
+/// Planning without a plan. Each query counts on its own, so alternating
+/// them still parks; a human answer starts a new stretch.
+#[tokio::test]
+async fn a_search_asked_again_after_its_stored_answer_parks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for query in ["original", "zz-absent", "original", "zz-absent"] {
+        fixture.conversational(json!({"action":"search","query": query}));
+        runner.advance().await.unwrap();
+        assert_ne!(
+            runner.task.phase,
+            Phase::AwaitingInput,
+            "{query}: {}",
+            runner.task.last_response
+        );
+    }
+    let response = runner.task.last_response.clone();
+    assert!(
+        response
+            .contains("cannot add anything -- propose the plan, or ask the human with question."),
+        "{response}"
+    );
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    let message = runner.task.last_response.clone();
+    assert!(
+        message.starts_with("The model keeps searching for 'original' (3 times), 'zz-absent' (2 times) without proposing a plan;"),
+        "{message}"
+    );
+    assert!(
+        message.contains("give the missing information"),
+        "{message}"
+    );
+    assert_eq!(
+        intent_details(&runner, "search_repeat_parked"),
+        vec!["'original' (3 times), 'zz-absent' (2 times)"]
+    );
+    assert_eq!(requests_of_kind(&fixture, "knowledge_search").len(), 2);
+
+    let calls = fixture.model_calls();
+    runner
+        .submit_message("Proceed on an assumption.".into())
+        .await
+        .unwrap();
+    assert_eq!(fixture.model_calls(), calls);
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    runner.advance().await.unwrap();
+    assert_ne!(
+        runner.task.phase,
+        Phase::AwaitingInput,
+        "{}",
+        runner.task.last_response
+    );
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("You already searched"));
+}
+
+/// A query holding the stored answer's own words is counted as itself (codex
+/// review): it parks on its own third ask, and a prefix of it is not counted.
+#[tokio::test]
+async fn a_query_holding_the_answers_words_is_counted_as_itself() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let odd = "a' in this task;b";
+    for query in ["a", odd, odd, "a", odd] {
+        fixture.conversational(json!({"action":"search","query": query}));
+        runner.advance().await.unwrap();
+        if query == "a" {
+            assert_ne!(
+                runner.task.phase,
+                Phase::AwaitingInput,
+                "{}",
+                runner.task.last_response
+            );
+        }
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(
+        intent_details(&runner, "search_repeat_parked"),
+        vec![format!("'a' (2 times), '{odd}' (3 times)")]
+    );
+}
+
+/// A proposed plan is progress: the repeats before it do not count toward
+/// the park after it.
+#[tokio::test]
+async fn a_proposed_plan_starts_a_new_stretch_for_repeated_searches() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"search","query":"original"}));
+        runner.advance().await.unwrap();
+    }
+    fixture.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["true"]}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingPlan);
+    runner.approve_plan().await.unwrap();
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    runner.advance().await.unwrap();
+    assert_ne!(
+        runner.task.phase,
+        Phase::AwaitingInput,
+        "{}",
+        runner.task.last_response
+    );
+    let response = runner.task.last_response.clone();
+    assert!(
+        response
+            .contains("cannot add anything -- edit, run a check, or finish if the work is done."),
+        "{response}"
+    );
+}
+
+/// Switched off, a repeated search is answered from its stored result every
+/// time and never parks, as before.
+#[tokio::test]
+async fn with_the_search_park_off_a_repeated_search_never_parks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    std::env::set_var("MOOSEDEV_HARNESS_SEARCH_PARK", "off");
+    for _ in 0..4 {
+        fixture.conversational(json!({"action":"search","query":"original"}));
+        runner.advance().await.unwrap();
+    }
+    std::env::remove_var("MOOSEDEV_HARNESS_SEARCH_PARK");
+    assert_ne!(runner.task.phase, Phase::AwaitingInput);
+    let response = runner.task.last_response.clone();
+    assert!(
+        response.contains("cannot add anything -- use a different action."),
+        "{response}"
+    );
+    assert!(intent_details(&runner, "search_repeat_parked").is_empty());
+}
+
 /// The index refresh at finish is journaled, never fatal, and off when the
 /// setting says so; associations and the capture note run after it.
 #[tokio::test]
