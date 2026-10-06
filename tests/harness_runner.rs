@@ -4799,6 +4799,8 @@ async fn accepted_governing_capture_is_not_retyped_after_approval_invalidation()
 #[tokio::test]
 async fn search_returns_accepted_knowledge_before_repository_matches() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // Counts the model's searches alone.
+    let _gather_off = GatherOff::set();
     let fixture = Fixture::new().await;
     fixture.shared.lock().unwrap().search_knowledge = Some(
         "[Constraint] Originals stay original (urn:fixture:search-knowledge)\nhasDescription: Never rename the original marker.\n"
@@ -4864,6 +4866,8 @@ async fn search_returns_accepted_knowledge_before_repository_matches() {
 #[tokio::test]
 async fn search_with_no_knowledge_match_returns_repository_matches_only() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // Counts the model's searches alone.
+    let _gather_off = GatherOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     fixture.conversational(json!({"action":"search","query":"original"}));
@@ -4934,6 +4938,8 @@ async fn a_second_empty_search_states_that_the_channel_is_exhausted() {
 #[tokio::test]
 async fn a_repeated_query_is_answered_without_re_running_it() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // Counts the model's searches alone.
+    let _gather_off = GatherOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     fixture.conversational(json!({"action":"search","query":"original"}));
@@ -4970,6 +4976,8 @@ async fn a_repeated_query_is_answered_without_re_running_it() {
 #[tokio::test]
 async fn a_search_asked_again_after_its_stored_answer_parks() {
     let _env_lock = ENVIRONMENT.lock().await;
+    // Counts the model's searches alone.
+    let _gather_off = GatherOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     for query in ["original", "zz-absent", "original", "zz-absent"] {
@@ -5104,6 +5112,119 @@ async fn with_the_search_park_off_a_repeated_search_never_parks() {
         "{response}"
     );
     assert!(intent_details(&runner, "search_repeat_parked").is_empty());
+}
+
+/// Entering a planning cycle, the harness searches the objective's words
+/// itself and shows the matching lines and the words found nowhere in the
+/// prompt head, the same on every step of the cycle (Lesson 0fd685fa: 99% of
+/// the sim's searches were the objective's own words). Not in Auto, and not
+/// with the switch off.
+#[tokio::test]
+async fn planning_starts_with_what_the_objectives_words_match() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture
+        .interactive_objective("Keep the original wording; zzunheardword stays out")
+        .await;
+    for _ in 0..2 {
+        fixture.conversational(json!({"action":"read","file":"code.txt"}));
+        runner.advance().await.unwrap();
+    }
+    let prompts: Vec<String> = requests_of_kind(&fixture, "model")
+        .iter()
+        .filter(|r| r["schema"] == "harness_action")
+        .map(|r| r["body"]["messages"].to_string())
+        .collect();
+    let header = "Gathered for this objective (the harness searched its words before planning";
+    let first = &prompts[0];
+    assert!(first.contains(header), "{first}");
+    assert!(first.contains("code.txt:1: original"), "{first}");
+    // The prompt is JSON-encoded here: a line ends at an escaped newline.
+    let absent = &first[first
+        .find("Words found nowhere in the repository or this knowledge:")
+        .unwrap()..];
+    let absent = &absent[..absent.find("\\n").unwrap()];
+    assert!(absent.contains("'zzunheardword'"), "{absent}");
+    assert!(!absent.contains("'original'"), "{absent}");
+    let block = |prompt: &str| {
+        let at = prompt.find(header).unwrap();
+        prompt[at..at + prompt[at..].find("found nowhere").unwrap()].to_string()
+    };
+    assert_eq!(
+        block(first),
+        block(&prompts[1]),
+        "the same block on every step of the cycle"
+    );
+    assert_eq!(intent_details(&runner, "objective_gathered").len(), 1);
+
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert!(!fixture.last_model_prompt("harness_action").contains(header));
+
+    let fixture = Fixture::new().await;
+    let _gather_off = GatherOff::set();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    assert!(!fixture.last_model_prompt("harness_action").contains(header));
+    assert!(intent_details(&runner, "objective_gathered").is_empty());
+}
+
+/// At a looking park the model is asked what it needs that is not shown, with
+/// the prompt that produced the loop; a non-empty answer heads the park
+/// message for the human, an empty one leaves it as it was, and the switch
+/// off sends no such request.
+#[tokio::test]
+async fn a_looking_park_says_what_the_model_is_missing() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    for (answer, switch_on) in [
+        (json!({"missing":["the yield table values"]}), true),
+        (json!({"missing":[]}), true),
+        (json!({"missing":[]}), false),
+    ] {
+        let fixture = Fixture::new().await;
+        if !switch_on {
+            std::env::set_var("MOOSEDEV_HARNESS_ASK_MISSING", "off");
+        }
+        let mut runner = fixture.interactive().await;
+        for ask in 0..3 {
+            fixture.conversational(json!({"action":"search","query":"original"}));
+            if ask == 2 && switch_on {
+                fixture.reply("harness_missing", answer.clone());
+            }
+            runner.advance().await.unwrap();
+        }
+        std::env::remove_var("MOOSEDEV_HARNESS_ASK_MISSING");
+        assert_eq!(runner.task.phase, Phase::AwaitingInput);
+        let message = runner.task.last_response.clone();
+        let asked = requests_of_kind(&fixture, "model")
+            .iter()
+            .filter(|r| r["schema"] == "harness_missing")
+            .count();
+        assert_eq!(asked, usize::from(switch_on), "{message}");
+        if answer["missing"].as_array().unwrap().is_empty() {
+            assert!(
+                message.starts_with("The model keeps searching for 'original'"),
+                "{message}"
+            );
+        } else {
+            assert!(
+                message.starts_with("The model needs information the project does not hold:\n- the yield table values\nGuidance is needed"),
+                "{message}"
+            );
+            assert!(
+                message.contains("(The model keeps searching for 'original'"),
+                "{message}"
+            );
+            let prompt = fixture.last_model_prompt("harness_missing");
+            assert!(
+                prompt.contains("list the information this change needs"),
+                "{prompt}"
+            );
+        }
+    }
 }
 
 /// The index refresh at finish is journaled, never fatal, and off when the

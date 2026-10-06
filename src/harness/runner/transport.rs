@@ -324,6 +324,25 @@ impl Runner {
         query: &str,
         max_bytes: Option<usize>,
     ) -> Result<KnowledgeSearchResult> {
+        let search = self.query_knowledge(query, max_bytes).await?;
+        self.task.knowledge_searches.push(search.clone());
+        let topic = format!("{} {}", self.task.objective, self.task.guidance)
+            .trim()
+            .to_owned();
+        self.ensure_knowledge_turn(&topic, &search.revision)
+            .searches
+            .push(search.clone());
+        Ok(search)
+    }
+
+    /// The daemon's answer to a knowledge query, recorded nowhere: the
+    /// harness's own search of the objective ([`Self::gather_for_objective`])
+    /// must not stand in for a model search of the same words.
+    pub(super) async fn query_knowledge(
+        &mut self,
+        query: &str,
+        max_bytes: Option<usize>,
+    ) -> Result<KnowledgeSearchResult> {
         let response: ContextResponse = self
             .post(
                 "context",
@@ -342,22 +361,14 @@ impl Runner {
             "daemon belongs to a different project"
         );
         self.update_knowledge_revision(response.revision.clone());
-        let search = KnowledgeSearchResult {
+        Ok(KnowledgeSearchResult {
             query: query.to_owned(),
             revision: response.revision.clone(),
             context: response.context.clone(),
             evidence_iris: response.evidence_iris.clone(),
             records: response.records.clone(),
             delivery_receipt: response.delivery_receipt.clone(),
-        };
-        self.task.knowledge_searches.push(search.clone());
-        let topic = format!("{} {}", self.task.objective, self.task.guidance)
-            .trim()
-            .to_owned();
-        self.ensure_knowledge_turn(&topic, &response.revision)
-            .searches
-            .push(search.clone());
-        Ok(search)
+        })
     }
 
     pub(super) fn snapshot(&self, files: &[String]) -> Result<BTreeMap<String, Option<String>>> {

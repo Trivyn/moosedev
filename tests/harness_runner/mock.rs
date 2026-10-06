@@ -1442,3 +1442,19 @@ impl Drop for ServeShownOff {
         std::env::remove_var("MOOSEDEV_HARNESS_SERVE_SHOWN");
     }
 }
+
+/// Sets `MOOSEDEV_HARNESS_OBJECTIVE_GATHER=off` for a test's life: Plan mode
+/// sends no search of the objective's words of its own, so a test can count
+/// the model's searches alone. Hold `ENVIRONMENT`.
+pub(super) struct GatherOff;
+impl GatherOff {
+    pub(super) fn set() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_OBJECTIVE_GATHER", "off");
+        Self
+    }
+}
+impl Drop for GatherOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_OBJECTIVE_GATHER");
+    }
+}

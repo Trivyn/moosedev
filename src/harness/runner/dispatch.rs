@@ -239,12 +239,21 @@ impl Runner {
         // A floor fallback holds for the step it happened in, however that
         // step ended.
         self.rule_claims_floor_only = false;
+        self.step_prompt = None;
+        self.looking_parked = false;
         let result = loop {
             match self.advance_inner().await {
                 Err(error) if self.repair_candidate(&error)? => continue,
                 outcome => break outcome,
             }
         };
+        // A read, inspect or search loop parked: the model names what it is
+        // missing before the human is asked.
+        if result.is_ok() && std::mem::take(&mut self.looking_parked) {
+            if let Some(prompt) = self.step_prompt.take() {
+                self.ask_what_is_missing(prompt).await?;
+            }
+        }
         if let Err(error) = &result {
             self.task.last_error = Some(format!("{error:#}"));
             self.task.last_error_kind = Some(error_kind(error).into());
@@ -347,6 +356,9 @@ impl Runner {
             "task reached {MAX_STEPS} model steps; inspect and provide new guidance"
         );
         let files = self.workspace.files()?;
+        // Entering a planning cycle, the harness searches the objective's
+        // words itself, before the model's first step of it.
+        self.gather_for_objective(&files).await?;
         let targets = self.task.read_files.clone();
         // The step's scope, before its refresh: in Plan mode the scope files
         // that may be preloaded bring their governing rules, not dossiers
@@ -445,6 +457,7 @@ impl Runner {
         // in the intent journal, whole on the request's journal entry, both
         // written when the request is sent ([`Self::model_json`]).
         self.context_plan = Some(plan);
+        self.step_prompt = Some(prompt.clone());
         let output: ModelOutput = self
             .model_json(&prompt, "harness_action", self.action_schema())
             .await?;
@@ -1688,6 +1701,7 @@ impl Runner {
         );
         self.task.phase = Phase::AwaitingInput;
         self.task.turn_finished = true;
+        self.looking_parked = true;
         self.park_under_approved_plan();
         true
     }
@@ -1784,6 +1798,7 @@ impl Runner {
             );
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
+            self.looking_parked = true;
             self.park_under_approved_plan();
             return true;
         }
@@ -1891,6 +1906,7 @@ impl Runner {
             );
             self.task.phase = Phase::AwaitingInput;
             self.task.turn_finished = true;
+            self.looking_parked = true;
             self.park_under_approved_plan();
             return;
         }

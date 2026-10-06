@@ -29,6 +29,7 @@ mod choice;
 mod context_plan;
 mod dispatch;
 mod finish;
+mod gather;
 mod index;
 mod langserver;
 mod links;
@@ -127,6 +128,11 @@ pub struct Runner {
     /// The rules snapshot the last built prompt took, committed to the task
     /// once its request is sent ([`Self::commit_rules_snapshot`]).
     pending_rules: std::sync::Mutex<Option<symbolic::RulesSnapshot>>,
+    /// The step prompt of the action this advance dispatched, and whether
+    /// that action parked on a read, inspect or search loop; then the model
+    /// is asked what it is missing ([`Self::ask_what_is_missing`]).
+    step_prompt: Option<String>,
+    looking_parked: bool,
     /// Set by `configure_provider`; a runner nobody configured runs no
     /// language server.
     language_settings: Option<crate::harness::startup::LanguageSettings>,
@@ -438,6 +444,8 @@ impl Runner {
             last_saved: Mutex::new(None),
             rule_claims_floor_only: false,
             pending_rules: Default::default(),
+            step_prompt: None,
+            looking_parked: false,
             language_settings: None,
             language: Default::default(),
             source_budget: None,
@@ -501,6 +509,8 @@ impl Runner {
             last_saved: Mutex::new(None),
             rule_claims_floor_only: false,
             pending_rules: Default::default(),
+            step_prompt: None,
+            looking_parked: false,
             language_settings: None,
             language: Default::default(),
             source_budget: None,

@@ -27,6 +27,14 @@ pub struct RulesSnapshot {
     pub entries: Vec<(String, String)>,
 }
 
+/// The block the harness gathered for a planning cycle from the objective's
+/// words, and the objective and guidance text it was gathered for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatheredState {
+    pub key: String,
+    pub block: String,
+}
+
 /// Durable derived state. Obligations are re-derived at every plan approval;
 /// the counters bound autonomous recoveries for the whole task.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -176,6 +184,10 @@ pub struct SymbolicState {
     /// tail ([`RulesSnapshot`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_snapshot: Option<RulesSnapshot>,
+    /// What the harness searched for the current planning cycle's objective
+    /// ([`Runner::gather_for_objective`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gathered: Option<GatheredState>,
     /// Digests of (file, grounding keys) whose grounding note was delivered;
     /// the same edit proposed again goes through.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]

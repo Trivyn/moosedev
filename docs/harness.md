@@ -1129,6 +1129,28 @@ Each query counts on its own, so alternating queries park too. Before, the
 stored answer never escalated: badciv-sim prompt 2 (simH1) searched four
 queries 211 times in Planning without proposing a plan.
 `MOOSEDEV_HARNESS_SEARCH_PARK=off` answers every repeat from the stored result.
+Entering a planning cycle (a new objective, or a human message that changes
+the guidance), the harness searches the objective's words itself before the
+model's first step of it: one pass over the repository (each file read once,
+up to 3,000 files of at most 256 KB) and one knowledge search for the whole
+objective. The words are those of three or more characters, hyphenated and
+snake_case words kept whole, stopwords and the action names dropped, at most
+64. The prompt head shows, after the accepted knowledge and in Plan mode only,
+"Gathered for this objective": the objective's knowledge, up to two matching
+lines per word (each line once) and the words found nowhere, bounded to 4 KB
+and the same on every step of the cycle (`objective_gathered`,
+`gathered_bytes`). The badciv-sim prompt-script runs showed why: 99% of the
+model's searches were the objective's own words, and looking loops caused
+67-86% of all parks (Lesson 0fd685fa). `MOOSEDEV_HARNESS_OBJECTIVE_GATHER=off`
+leaves the looking to the model.
+When a read, inspect or search park fires, the model is first asked, with the
+prompt that produced the looping action, what the change needs that the
+project, the knowledge and the results shown do not contain (a list of at
+most 5 items, `harness_missing`). A non-empty list heads the park message for
+the human ("The model needs information the project does not hold"), with the
+park's own line after it; an empty one leaves the park as it was; a failed
+request is journaled (`missing_failed`) and the park stands
+(`missing_asked`). `MOOSEDEV_HARNESS_ASK_MISSING=off` parks without asking.
 Consecutive searches matching
 nothing are counted: the second states that the channel is exhausted and names
 the actions the current mode still offers. The final checkpoint

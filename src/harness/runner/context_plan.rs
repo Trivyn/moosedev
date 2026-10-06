@@ -29,6 +29,10 @@ pub(super) struct ContextPlan {
     /// Role, guidance, rules, instructions, knowledge and the plan; in the
     /// stable head (`stable_head_enabled`) also the output schema.
     pub head_bytes: usize,
+    /// Of the head, the block the harness gathered from the objective's words
+    /// before planning (0 outside Plan mode or with it off).
+    #[serde(default)]
+    pub gathered_bytes: usize,
     /// Guidance, harness state and the allowed actions.
     pub state_bytes: usize,
     /// The output schema appended to the prompt under the json_schema

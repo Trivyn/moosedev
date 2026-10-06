@@ -1623,6 +1623,11 @@ impl Runner {
             "\nConfigured model ID: {}\nCurrent human objective: {}\nCurrent accepted knowledge:\n{}\n",
             config.model, self.task.objective, context.context,
         ));
+        // What the harness searched for this planning cycle's objective, in
+        // the head: it changes only when a cycle starts.
+        if let Some(block) = self.gathered_block() {
+            prompt.push_str(block);
+        }
         // The Plan line, ending the head, for a given summary view. Chosen
         // below, once the rest of the protected prompt is known.
         let plan_line = |summary: Option<String>| -> Result<String> {
@@ -2139,6 +2144,7 @@ impl Runner {
             navigation_bytes: navigation.len(),
             observations_bytes: observations.len(),
             head_bytes,
+            gathered_bytes: self.gathered_block().map_or(0, str::len),
             state_bytes: state.len(),
             // What the request appends is added when it is sent.
             schema_bytes: 0,
