@@ -11,7 +11,6 @@
 use super::task::bounded;
 use super::{Mode, Phase, Runner};
 use anyhow::Result;
-use serde::Deserialize;
 use serde_json::json;
 
 /// Opens the gathered block in the prompt head.
@@ -270,9 +269,30 @@ fn render_block(knowledge: &str, lines: &[String], absent: &[String], skipped: u
     block
 }
 
-#[derive(Deserialize)]
-struct Missing {
-    missing: Vec<String>,
+/// What a model's answer to the missing question names. The step prompt it
+/// is asked on carries the action schema in its head, so a model may answer
+/// with an action: a `question` names what is missing in its own words
+/// (simH3 prompt 2's fourth answer: "no yield table is defined anywhere");
+/// any other action names nothing.
+fn missing_items(answer: &serde_json::Value) -> Vec<String> {
+    let named: Vec<String> = match answer["missing"].as_array() {
+        Some(items) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::to_owned)
+            .collect(),
+        None if answer["action"] == "question" => answer["question"]
+            .as_str()
+            .map(|question| vec![question.to_owned()])
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    named
+        .into_iter()
+        .map(|item| item.trim().to_owned())
+        .filter(|item| !item.is_empty())
+        .take(MAX_MISSING)
+        .collect()
 }
 
 impl Runner {
@@ -442,20 +462,17 @@ impl Runner {
         let schema = json!({"type":"object","additionalProperties":false,"required":["missing"],"properties":{"missing":{"type":"array","maxItems":MAX_MISSING,"items":{"type":"string","maxLength":300}}}});
         let prompt = format!("{step_prompt}{MISSING_QUESTION}");
         match self
-            .model_json::<Missing>(&prompt, "harness_missing", schema)
+            .model_json::<serde_json::Value>(&prompt, "harness_missing", schema)
             .await
         {
             Err(error) => {
                 self.intent_event("missing_failed", &bounded(&format!("{error:#}"), 300));
             }
             Ok(answer) => {
-                let items: Vec<String> = answer
-                    .missing
-                    .into_iter()
-                    .map(|item| item.trim().to_owned())
-                    .filter(|item| !item.is_empty())
-                    .take(MAX_MISSING)
-                    .collect();
+                let items = missing_items(&answer);
+                if let Some(action) = answer["action"].as_str().filter(|_| items.is_empty()) {
+                    self.intent_event("missing_answered_with_action", action);
+                }
                 self.intent_event("missing_asked", &format!("{} item(s)", items.len()));
                 if !items.is_empty() {
                     let list = items
@@ -505,6 +522,19 @@ mod tests {
         assert_eq!(terms[0], "schema");
         let unique: std::collections::BTreeSet<_> = terms.iter().collect();
         assert_eq!(unique.len(), terms.len());
+    }
+
+    #[test]
+    fn a_question_answers_the_missing_question_and_another_action_names_nothing() {
+        assert_eq!(
+            missing_items(&json!({"missing": [" the yield table ", ""]})),
+            ["the yield table"]
+        );
+        assert_eq!(
+            missing_items(&json!({"action": "question", "question": "What yield values?"})),
+            ["What yield values?"]
+        );
+        assert!(missing_items(&json!({"action": "search", "query": "yield"})).is_empty());
     }
 
     #[test]

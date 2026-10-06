@@ -1148,7 +1148,9 @@ leaves the looking to the model.
 When a read, inspect or search park fires, the model is first asked, with the
 prompt that produced the looping action, what the change needs that the
 project, the knowledge and the results shown do not contain (a list of at
-most 5 items, `harness_missing`). A non-empty list heads the park message for
+most 5 items, `harness_missing`; an answer given as a `question` action
+counts as naming it, any other action names nothing,
+`missing_answered_with_action`). A non-empty list heads the park message for
 the human ("The model needs information the project does not hold"), with the
 park's own line after it; an empty one leaves the park as it was; a failed
 request is journaled (`missing_failed`) and the park stands
