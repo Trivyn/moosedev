@@ -17,7 +17,11 @@ use serde_json::json;
 /// Opens the gathered block in the prompt head.
 pub(super) const GATHER_HEADER: &str = "Gathered for this objective (the harness searched its words before planning; searching them again shows the same):\n";
 const MAX_TERMS: usize = 64;
-const LINES_PER_TERM: usize = 2;
+/// The most lines shown from one file, and in all, ranked by how many of the
+/// objective's words each holds.
+const LINES_PER_FILE: usize = 6;
+const MAX_LINES: usize = 40;
+const MAX_CANDIDATES: usize = 20_000;
 const LINE_CHARS: usize = 160;
 const BLOCK_BYTES: usize = 4_000;
 const KNOWLEDGE_BYTES: usize = 1_200;
@@ -168,6 +172,16 @@ fn ask_missing_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_ASK_MISSING").map_or(true, |value| value.trim() != "off")
 }
 
+/// Whether a repository path is searched for the objective's words: not a
+/// hidden path (tooling and agent configuration such as `.claude/`) and not a
+/// generated lockfile.
+fn searchable(file: &str) -> bool {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    !file.split('/').any(|part| part.starts_with('.'))
+        && !name.ends_with(".lock")
+        && !matches!(name, "package-lock.json" | "pnpm-lock.yaml" | "go.sum")
+}
+
 /// The objective's words worth searching, lowercased, in order of first
 /// appearance: three or more characters, hyphenated and snake_case words kept
 /// whole ("city-legal", "map_name"), anything else a separator
@@ -304,8 +318,10 @@ impl Runner {
         }
         let terms = objective_terms(&text);
         let mut found = vec![false; terms.len()];
-        let mut lines: Vec<String> = Vec::new();
-        let mut per_term = vec![0usize; terms.len()];
+        // Every line holding an objective word, scored by how many distinct
+        // words it holds: a line naming several of them is about the
+        // objective, one naming a single common word mostly is not.
+        let mut candidates: Vec<(usize, usize, usize, String)> = Vec::new();
         let mut read = 0;
         let mut skipped = 0;
         for (position, file) in files.iter().enumerate() {
@@ -313,49 +329,59 @@ impl Runner {
                 skipped += files.len() - position;
                 break;
             }
+            if !searchable(file) {
+                continue;
+            }
             // Sized before it is read: a large file is skipped, not loaded.
             let small = std::fs::metadata(self.workspace.root().join(file))
                 .is_ok_and(|meta| meta.len() <= MAX_FILE_BYTES as u64);
-            let text = match small.then(|| self.workspace.read(file)) {
-                Some(Ok(Some(text))) => {
+            let source = match small.then(|| self.workspace.read(file)) {
+                Some(Ok(Some(source))) => {
                     read += 1;
-                    text
+                    source
                 }
                 _ => {
                     skipped += 1;
-                    String::new()
+                    continue;
                 }
             };
             let path = file.to_lowercase();
-            let lower = text.to_lowercase();
+            let lower = source.to_lowercase();
             for (index, term) in terms.iter().enumerate() {
-                let in_text = lower.contains(term.as_str());
-                if !in_text && !path.contains(term.as_str()) {
-                    continue;
-                }
-                found[index] = true;
-                if !in_text || per_term[index] == LINES_PER_TERM {
-                    continue;
-                }
-                // Lowercasing adds no line breaks, so the lines pair up.
-                for (number, (line, lowered)) in text.lines().zip(lower.lines()).enumerate() {
-                    if !lowered.contains(term.as_str()) {
-                        continue;
-                    }
-                    let shown = format!(
-                        "{file}:{}: {}",
-                        number + 1,
-                        bounded(line.trim(), LINE_CHARS)
-                    );
-                    if !lines.contains(&shown) {
-                        lines.push(shown);
-                    }
-                    per_term[index] += 1;
-                    if per_term[index] == LINES_PER_TERM {
-                        break;
-                    }
+                if path.contains(term.as_str()) || lower.contains(term.as_str()) {
+                    found[index] = true;
                 }
             }
+            // Lowercasing adds no line breaks, so the lines pair up.
+            for (number, (line, lowered)) in source.lines().zip(lower.lines()).enumerate() {
+                let score = terms
+                    .iter()
+                    .filter(|term| lowered.contains(term.as_str()))
+                    .count();
+                if score > 0 && candidates.len() < MAX_CANDIDATES {
+                    candidates.push((
+                        score,
+                        position,
+                        number,
+                        format!(
+                            "{file}:{}: {}",
+                            number + 1,
+                            bounded(line.trim(), LINE_CHARS)
+                        ),
+                    ));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let mut per_file: std::collections::BTreeMap<usize, usize> = Default::default();
+        let mut lines: Vec<String> = Vec::new();
+        for (_, position, _, shown) in candidates {
+            let count = per_file.entry(position).or_default();
+            if *count == LINES_PER_FILE || lines.len() == MAX_LINES {
+                continue;
+            }
+            *count += 1;
+            lines.push(shown);
         }
         // The objective's knowledge by relevance, recorded as no model search;
         // a daemon failure leaves the repository half.
@@ -479,6 +505,16 @@ mod tests {
         assert_eq!(terms[0], "schema");
         let unique: std::collections::BTreeSet<_> = terms.iter().collect();
         assert_eq!(unique.len(), terms.len());
+    }
+
+    #[test]
+    fn hidden_paths_and_lockfiles_are_not_searched() {
+        assert!(searchable("badciv-map.md"));
+        assert!(searchable("badciv-map/src/lib.rs"));
+        assert!(!searchable(".gitignore"));
+        assert!(!searchable(".claude/skills/a/SKILL.md"));
+        assert!(!searchable("Cargo.lock"));
+        assert!(!searchable("web/package-lock.json"));
     }
 
     #[test]

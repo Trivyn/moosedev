@@ -1136,9 +1136,11 @@ up to 3,000 files of at most 256 KB) and one knowledge search for the whole
 objective. The words are those of three or more characters, hyphenated and
 snake_case words kept whole, stopwords and the action names dropped, at most
 64. The prompt head shows, after the accepted knowledge and in Plan mode only,
-"Gathered for this objective": the objective's knowledge, up to two matching
-lines per word (each line once) and the words found nowhere, bounded to 4 KB
-and the same on every step of the cycle (`objective_gathered`,
+"Gathered for this objective": the objective's knowledge, the repository
+lines holding the most of its words (ranked by how many distinct words a line
+holds, at most 6 a file and 40 in all; hidden paths such as `.claude/` and
+generated lockfiles are not searched) and the words found nowhere, bounded to
+4 KB and the same on every step of the cycle (`objective_gathered`,
 `gathered_bytes`). The badciv-sim prompt-script runs showed why: 99% of the
 model's searches were the objective's own words, and looking loops caused
 67-86% of all parks (Lesson 0fd685fa). `MOOSEDEV_HARNESS_OBJECTIVE_GATHER=off`
