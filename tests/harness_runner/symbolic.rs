@@ -580,6 +580,7 @@ async fn a_planned_file_named_like_an_action_is_written() {
 #[tokio::test]
 async fn symbolic_scope_escapes_are_bounded_per_task_and_park_for_guidance() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     std::fs::write(fixture.root.join("other.py"), "x = 1\n").unwrap();
     let mut runner = planned_symbolic_runner(&fixture).await;
@@ -624,6 +625,7 @@ async fn symbolic_scope_escapes_are_bounded_per_task_and_park_for_guidance() {
 #[tokio::test]
 async fn symbolic_noop_edit_is_repaired_while_the_language_server_reports_errors() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
@@ -816,6 +818,7 @@ async fn the_noop_repair_names_planned_files_not_written_yet() {
     // badciv e3c533b4: lib.rs declared modules whose planned files did not
     // exist, and a repair naming only lib.rs sent a4b back to it twice.
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = fixture.interactive().await;
     fixture.conversational(json!({"action":"read","file":"labels.py"}));
@@ -843,6 +846,7 @@ async fn the_noop_repair_names_planned_files_not_written_yet() {
 #[tokio::test]
 async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
@@ -944,6 +948,7 @@ async fn symbolic_noop_edit_runs_checks_unless_this_source_already_failed() {
 #[tokio::test]
 async fn a_finish_never_reruns_a_required_check_the_source_already_failed() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     // A check the sandbox appears to block, naming no path the model could
@@ -2064,6 +2069,7 @@ async fn a_dropped_proposal_is_rejected_within_the_accepted_capture() {
 #[tokio::test]
 async fn an_unchanged_repeat_of_a_command_is_refused_then_parks() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
     runner.approve_plan().await.unwrap();
@@ -2357,6 +2363,7 @@ async fn a_hint_answering_a_repeat_park_continues_the_approved_plan() {
     // badciv P5: "The enums are defined in codes.rs…" answered a repeat park
     // and cost a ~5-minute replan and a plan approval, twice.
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = repeat_parked_runner(&fixture).await;
     runner
@@ -2384,6 +2391,7 @@ async fn a_hint_answering_a_repeat_park_continues_the_approved_plan() {
 #[tokio::test]
 async fn a_negated_hint_continues_a_park_but_a_turning_word_replans() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = repeat_parked_runner(&fixture).await;
     runner
@@ -2437,6 +2445,7 @@ async fn a_negated_hint_continues_a_park_but_a_turning_word_replans() {
 #[tokio::test]
 async fn a_park_answer_naming_a_file_outside_the_plan_replans() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = repeat_parked_runner(&fixture).await;
     runner
@@ -2473,6 +2482,7 @@ impl Drop for ScopeChoiceOff {
 #[tokio::test]
 async fn answering_a_scope_exhausted_park_still_replans() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let _scope_choice = ScopeChoiceOff::new();
     let fixture = symbolic_fixture().await;
     std::fs::write(fixture.root.join("other.py"), "x = 1\n").unwrap();
@@ -2498,6 +2508,7 @@ async fn answering_a_scope_exhausted_park_still_replans() {
 async fn headless_answer_and_a_conversation_message_agree() {
     use moosedev::harness::tui::{execute, Action};
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let _scope_choice = ScopeChoiceOff::new();
     let hint = "The body is `return name`; replace exactly that.";
     let mut outcomes = Vec::new();
@@ -2542,6 +2553,7 @@ async fn headless_answer_and_a_conversation_message_agree() {
 #[tokio::test]
 async fn answering_a_stall_park_or_a_read_repeat_park_continues_the_plan() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // These cover the refusal of a file shown in full, which a first read
     // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
     let _serve_off = ServeShownOff::set();
@@ -2911,6 +2923,7 @@ async fn a_repeated_noop_narrows_the_offer_to_the_missing_files() {
 #[tokio::test]
 async fn a_narrowed_repair_refuses_a_write_elsewhere_and_other_repeats_park_early() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // Narrowed, then a write to a file outside the set is refused.
     let fixture = symbolic_fixture().await;
     let mut runner = missing_module_runner(&fixture).await;
@@ -3269,6 +3282,7 @@ fn stall_count(runner: &Runner) -> Option<usize> {
 #[tokio::test]
 async fn the_same_failure_with_no_edit_between_is_focused_then_parks() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = symbolic_fixture().await;
     let mut runner = stalled_failure_runner(&fixture).await;
     act(&fixture, &mut runner, failing_test_command("a")).await;
@@ -3376,6 +3390,7 @@ async fn an_applied_edit_starts_the_count_again() {
 #[tokio::test]
 async fn a_failure_in_a_source_seen_before_is_not_progress() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
     let back = json!({"action":"replace","file":"labels.py","old_text":"    return name.lower()\n","new_text":"    return name\n"});
     for by_state in [true, false] {
@@ -3538,6 +3553,7 @@ async fn a_return_to_a_source_from_before_the_failure_does_not_count() {
 #[tokio::test]
 async fn a_failed_source_is_remembered_across_a_human_answer() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
     let back = json!({"action":"replace","file":"labels.py","old_text":"    return name.lower()\n","new_text":"    return name\n"});
     let fixture = symbolic_fixture().await;
@@ -3715,6 +3731,7 @@ async fn a_required_checks_first_failure_shows_where_to_look() {
 #[tokio::test]
 async fn a_look_that_would_park_while_a_check_fails_is_steered_once() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // These cover the refusal of a file shown in full, which a first read
     // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
     let _serve_off = ServeShownOff::set();
@@ -4595,6 +4612,7 @@ async fn finished_with_notes_unedited(fixture: &Fixture) -> Runner {
 #[tokio::test]
 async fn a_planned_file_left_unedited_is_sent_back_once_then_asked() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = finished_with_notes_unedited(&fixture).await;
     runner.choose("finish").await.unwrap();
@@ -5993,6 +6011,7 @@ async fn switched_off_rules_by_state_and_satisfied_leave_the_prompt_as_before() 
 #[tokio::test]
 async fn a_replace_of_an_earlier_version_says_so_and_a_repeat_parks_as_the_loop() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let lower = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.lower()\n"});
     let stale = json!({"action":"replace","file":"labels.py","old_text":"    return name\n","new_text":"    return name.upper()\n"});
     for on in [true, false] {

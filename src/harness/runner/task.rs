@@ -24,6 +24,18 @@ pub enum Phase {
     AwaitingReview,
     Cancelled,
     Complete,
+    /// Ended by the harness's best-effort finish after the model stayed
+    /// stuck: the required checks did not pass, and what the task decided
+    /// was captured as unverified ([`Runner::best_effort_finish`]).
+    Incomplete,
+}
+
+impl Phase {
+    /// Whether the task has ended, completed or not: a new request starts a
+    /// new task.
+    pub fn is_finished(self) -> bool {
+        matches!(self, Phase::Complete | Phase::Incomplete)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -536,6 +548,17 @@ pub struct Task {
     /// Human capture review is resolved; retry only completion checks on failure.
     #[serde(default)]
     pub(super) completion_pending: bool,
+    /// Set when the harness finishes a stuck task as best it can: the kind
+    /// of stop that ended the recoveries ([`Runner::best_effort_finish`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) best_effort: Option<String>,
+    /// The end-of-task capture of a best-effort finish whose required checks
+    /// failed: what was decided, marked unverified.
+    #[serde(default)]
+    pub(super) incomplete_capture: bool,
+    /// Harness recoveries since the last progress ([`Runner::recover`]).
+    #[serde(default)]
+    pub(super) stuck_recoveries: usize,
     /// Cancellation is durable even when scratch cleanup must be retried.
     #[serde(default)]
     pub cleanup_pending: bool,
@@ -593,8 +616,10 @@ pub struct StandingGuidance {
 impl Task {
     /// The review of the task's final capture, after every required check
     /// passed: where `/rework` can send the work back instead of completing.
+    /// At the review of a task's end-of-task capture: a finished task's, or
+    /// a best-effort finish's whose checks failed.
     pub fn at_final_review(&self) -> bool {
-        self.phase == Phase::AwaitingReview && self.final_capture
+        self.phase == Phase::AwaitingReview && (self.final_capture || self.incomplete_capture)
     }
 }
 

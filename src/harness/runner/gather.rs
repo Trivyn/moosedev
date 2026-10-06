@@ -456,7 +456,11 @@ impl Runner {
     /// shown, and put a non-empty answer at the head of the park message. One
     /// request per park; a failed request leaves the plain park.
     pub(super) async fn ask_what_is_missing(&mut self, step_prompt: String) -> Result<()> {
-        if !ask_missing_enabled() || self.task.phase != Phase::AwaitingInput {
+        // A park (recovery off), or a harness recovery from the loop (on).
+        let parked = self.task.phase == Phase::AwaitingInput;
+        let recovered = matches!(self.task.phase, Phase::Planning | Phase::Working)
+            && self.task.best_effort.is_none();
+        if !ask_missing_enabled() || !(parked || recovered) {
             return Ok(());
         }
         let schema = json!({"type":"object","additionalProperties":false,"required":["missing"],"properties":{"missing":{"type":"array","maxItems":MAX_MISSING,"items":{"type":"string","maxLength":300}}}});
@@ -481,10 +485,24 @@ impl Runner {
                         .collect::<Vec<_>>()
                         .join("\n");
                     self.event(format!("The model named what it is missing:\n{list}"));
-                    self.task.last_response = format!(
-                        "The model needs information the project does not hold:\n{list}\nGuidance is needed: give it, or say to proceed with stated placeholders.\n({})",
-                        self.task.last_response
-                    );
+                    if parked {
+                        self.task.last_response = format!(
+                            "The model needs information the project does not hold:\n{list}\nGuidance is needed: give it, or say to proceed with stated placeholders.\n({})",
+                            self.task.last_response
+                        );
+                    } else {
+                        // Information only the human holds is the human's
+                        // stop (AD ad50c9cd): the recovery gives way to it.
+                        self.event(
+                            "Harness recovery set aside: the model named information only the human holds.",
+                        );
+                        self.task.last_response = format!(
+                            "The model needs information the project does not hold:\n{list}\nGuidance is needed: give it, or say to proceed with stated placeholders."
+                        );
+                        self.task.phase = Phase::AwaitingInput;
+                        self.task.turn_finished = true;
+                        self.park_under_approved_plan();
+                    }
                 }
             }
         }

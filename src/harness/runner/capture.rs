@@ -10,7 +10,7 @@ impl Runner {
     pub(super) fn capture_work_phase(&self) -> Phase {
         if self.task.mode == Mode::Plan {
             Phase::Planning
-        } else if self.task.final_capture {
+        } else if self.task.final_capture || self.task.incomplete_capture {
             Phase::Verifying
         } else {
             Phase::Working
@@ -49,7 +49,10 @@ impl Runner {
             Phase::AwaitingReview
         } else if self.task.capture_due {
             self.capture_work_phase()
-        } else if !self.task.batch_capture || self.task.final_capture {
+        } else if !self.task.batch_capture
+            || self.task.final_capture
+            || self.task.incomplete_capture
+        {
             Phase::AwaitingReview
         } else {
             self.task.after_review
@@ -157,7 +160,8 @@ impl Runner {
             } else {
                 self.task.after_review
             };
-            self.task.phase = if governing || (self.task.final_capture && !self.task.capture_due) {
+            let end = self.task.final_capture || self.task.incomplete_capture;
+            self.task.phase = if governing || (end && !self.task.capture_due) {
                 Phase::AwaitingReview
             } else {
                 continuation

@@ -753,6 +753,16 @@ fn gate(task: &Task, standing: &[String]) -> Gate {
             gate.note("Describe the next request to continue this conversation.");
             gate
         }
+        Phase::Incomplete => {
+            // The journal's last line says which checks failed and whether
+            // anything was captured.
+            let mut gate = Gate::new(
+                Color::Yellow,
+                "Task ended incomplete: the model stayed stuck and the harness finished it as best it could.",
+            );
+            gate.note("Any records it captured are marked unverified. Describe the next request to continue.");
+            gate
+        }
         _ => Gate::default(),
     }
 }
@@ -1880,7 +1890,9 @@ fn evidence_lines(evidence: &[String]) -> String {
 fn rework_state(task: &Task) -> Option<bool> {
     task.at_final_review().then(|| {
         review_evidence(task).iter().any(|fact| {
-            fact.starts_with("Planned files not edited") || fact.starts_with("Stubs left")
+            fact.starts_with("Planned files not edited")
+                || fact.starts_with("Stubs left")
+                || fact.starts_with("Required checks failed")
         })
     })
 }

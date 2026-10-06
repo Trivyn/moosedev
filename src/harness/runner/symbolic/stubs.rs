@@ -257,7 +257,7 @@ pub(in crate::harness::runner) fn plan_stubs_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_PLAN_STUBS").map_or(true, |value| value.trim() != "off")
 }
 
-use super::super::{Phase, Runner};
+use super::super::Runner;
 use anyhow::Result;
 
 /// A stub left in a planned file: `(file, line, stub)`, 1-based line.
@@ -498,15 +498,15 @@ impl Runner {
                 self.symbolic_state_mut().unedited_work_at = None;
                 let files = unedited.join(", ");
                 self.intent_event("unedited_work_parked", &files);
-                self.task.last_response = format!(
-                    "The model finished again without editing {files}, after the human said the plan still needs them. Guidance is needed: say what each file needs; the next finish asks again, where finish verifies as it stands."
+                self.stop_stuck(
+                    "unedited work",
+                    format!(
+                        "Finish refused: {files} still unedited after the human chose work; parked for guidance."
+                    ),
+                    format!(
+                        "The model finished again without editing {files}, after the human said the plan still needs them. Guidance is needed: say what each file needs; the next finish asks again, where finish verifies as it stands."
+                    ),
                 );
-                self.event(format!(
-                    "Finish refused: {files} still unedited after the human chose work; parked for guidance."
-                ));
-                self.task.phase = Phase::AwaitingInput;
-                self.task.turn_finished = true;
-                self.park_under_approved_plan();
                 return Ok(true);
             }
             self.ask_unedited_planned_files(unedited)?;

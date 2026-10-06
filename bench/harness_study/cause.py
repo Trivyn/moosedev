@@ -45,6 +45,10 @@ SYMBOLIC_HALT_CAUSES = frozenset({"scope_escape_exhausted", "capture_retype_exha
 # frozen clarification cap is reported separately: it is a reviewer budget.
 UNATTENDED_HALT_CLASS = SYMBOLIC_HALT_CAUSES | {"model_repair_exhausted", "reviewer_idle_deadline"}
 SYMBOLIC_TERMINAL_CAUSES = TERMINAL_CAUSES | SYMBOLIC_HALT_CAUSES
+# Recover, don't park (AD ad50c9cd): the harness ended a stuck task as best it
+# could, in the terminal phase Incomplete. Kept out of the sets above, whose
+# sealed identities hash them.
+RECOVER_TERMINAL_CAUSES = frozenset({"incomplete"})
 # After a park, any of these means a human continued the task.
 SYMBOLIC_RESUME_KINDS = frozenset({"cycle_started", "plan_approved", "obligations_derived", "edit_applied"})
 # Three missing rounds against offered candidates charge the controller; an empty
@@ -85,6 +89,8 @@ def classify(outcome, last_task, final, driver_state):
         return _classify_native(outcome, driver_state)
     if final.get("terminal") == "success" and driver_state.get("closed_seen") and status == "success":
         return "success", "complete"
+    if task.get("phase") == "Incomplete":
+        return "incomplete", task.get("best_effort")
     recovery = task.get("recovery") or {}
     if recovery.get("status") == "awaiting_guidance":
         return "model_repair_exhausted", recovery.get("purpose")

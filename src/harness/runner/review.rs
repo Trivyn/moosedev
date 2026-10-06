@@ -254,6 +254,11 @@ impl Runner {
             self.task.phase = self.capture_work_phase();
             return self.persist();
         }
+        if self.task.incomplete_capture {
+            self.task.review_continuation = None;
+            self.persist()?;
+            return self.finish_incomplete().await;
+        }
         if self.task.final_capture {
             self.task.review_continuation = None;
             self.task.phase = Phase::Verifying;
@@ -407,6 +412,10 @@ impl Runner {
         } else if self.task.pending_capture.is_some() {
             self.resolve_pending_capture(false).await?;
         }
+        // Sent back at an incomplete end, the task goes on as a sent-back
+        // finished one does.
+        self.progressed();
+        self.task.incomplete_capture = false;
         self.event(format!("Human sent the work back at review: {note}"));
         self.task.review_continuation = None;
         if let Some(state) = self.task.symbolic.as_mut() {
@@ -460,6 +469,9 @@ impl Runner {
                 .iter()
                 .skip(self.task.capture_cursor)
                 .any(|e| e.message.starts_with("Human response:"));
+        }
+        if self.task.incomplete_capture && !self.task.capture_due {
+            return self.finish_incomplete().await;
         }
         if self.task.final_capture && !self.task.capture_due {
             return self.finish().await;
@@ -555,6 +567,13 @@ fn capture_reviewed(accept: bool) -> &'static str {
 /// on across it. badciv run 14 (c7abc2d0) looped 15 times through inspect,
 /// `ls`, read and `cargo test` without a refusal, because every headless
 /// checkpoint journaled "Human confirmed…" and ended the window.
+/// Whether a journal event restarts the loop guards' windows: human
+/// progress, or the harness's own recovery from a model-stuck stop, which
+/// stands in for the answer a human would have given ([`super::recover`]).
+pub(super) fn is_progress(message: &str) -> bool {
+    is_human_progress(message) || message.starts_with(super::recover::HARNESS_RECOVERY)
+}
+
 pub(super) fn is_human_progress(message: &str) -> bool {
     message.starts_with("Human ")
         && message != NO_KNOWLEDGE_CONFIRMED

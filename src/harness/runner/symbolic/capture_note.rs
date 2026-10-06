@@ -6,7 +6,9 @@ use super::super::plan_view::{plan_view, PLAN_VIEW_BYTES};
 use super::super::scope::changed_files;
 use super::super::source::failed_command_output;
 use super::super::{ApprovedPlan, Phase, Runner};
-use super::{CaptureNoteState, NoteAnswer, CAPTURE_NOTE_QUESTION, MAX_RETYPES};
+use super::{
+    CaptureNoteState, NoteAnswer, CAPTURE_NOTE_QUESTION, INCOMPLETE_NOTE_QUESTION, MAX_RETYPES,
+};
 use crate::harness::protocol::{
     CaptureRequest, CaptureTypeRequest, CaptureTypeResponse, KnowledgeProposal, RestatedCandidate,
     SupportEvent, TypedDisposition,
@@ -32,7 +34,7 @@ impl Runner {
             .task
             .capture_checkpoint_end
             .get_or_insert(self.task.events.len());
-        if !self.task.final_capture {
+        if !self.task.final_capture && !self.task.incomplete_capture {
             let events = checkpoint_end.saturating_sub(self.task.capture_cursor);
             self.event(format!(
                 "Capture checkpoint deferred to the final note ({events} events)."
@@ -54,7 +56,15 @@ impl Runner {
                 .model_json(&prompt, "harness_capture_note", schema)
                 .await?;
             self.candidate_accepted();
-            let note = answer.note.trim().to_string();
+            let mut note = answer.note.trim().to_string();
+            // A best-effort finish's note says so, so every record typed
+            // from it carries it.
+            if self.task.incomplete_capture {
+                note = format!(
+                    "Unverified: the task ended before its required checks passed ({}). {note}",
+                    self.failing_checks().join("; ")
+                );
+            }
             self.event(format!("Capture note: {note}"));
             let note_event = self.task.events.len() - 1;
             self.intent_event(
@@ -397,8 +407,13 @@ impl Runner {
                     .collect()
             })
             .unwrap_or_default();
+        let question = if self.task.incomplete_capture {
+            INCOMPLETE_NOTE_QUESTION
+        } else {
+            CAPTURE_NOTE_QUESTION
+        };
         format!(
-            "{CAPTURE_NOTE_QUESTION}\n\nObjective: {}\nFiles edited: {}\nChecks: {}\n\n{}",
+            "{question}\n\nObjective: {}\nFiles edited: {}\nChecks: {}\n\n{}",
             self.task.objective,
             self.changed_file_names().join(", "),
             if checks.is_empty() {

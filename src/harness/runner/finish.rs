@@ -128,8 +128,8 @@ impl Runner {
     pub async fn cancel(&mut self) -> Result<()> {
         self.preserve_stream();
         anyhow::ensure!(
-            self.task.phase != Phase::Complete,
-            "completed task cannot be cancelled"
+            !self.task.phase.is_finished(),
+            "a finished task cannot be cancelled"
         );
         if self.task.phase != Phase::Cancelled {
             self.task.resume_phase = self.task.phase;
@@ -205,10 +205,7 @@ impl Runner {
     }
 
     pub async fn resume(&mut self) -> Result<()> {
-        anyhow::ensure!(
-            self.task.phase != Phase::Complete,
-            "task is already complete"
-        );
+        anyhow::ensure!(!self.task.phase.is_finished(), "task has already ended");
         self.retry_cancelled_cleanup()?;
         if self.task.phase == Phase::Cancelled {
             self.task.phase = self.task.resume_phase;

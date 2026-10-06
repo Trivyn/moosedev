@@ -26,7 +26,7 @@ pub use state::{
     CaptureNoteState, FailedRun, GatheredState, RulesSnapshot, SymbolicAssociation, SymbolicState,
     FRUITLESS_SEARCH_LIMIT, MAX_RETYPES, MAX_SCOPE_ESCAPES,
 };
-use state::{NoteAnswer, CAPTURE_NOTE_QUESTION};
+use state::{NoteAnswer, CAPTURE_NOTE_QUESTION, INCOMPLETE_NOTE_QUESTION};
 
 /// Whether a model replan is held once while every current error is in the
 /// approved files. `MOOSEDEV_HARNESS_REPLAN_HOLD=off` lets every replan
@@ -174,6 +174,15 @@ impl Runner {
                 "scope_escape_exhausted",
                 &format!("{file}: escape {escapes}, bound {MAX_SCOPE_ESCAPES}"),
             );
+            // Recover, don't park (AD ad50c9cd): keep to the approved files.
+            if super::recover::recover_enabled() {
+                self.event(message.clone());
+                self.recover(
+                    "scope escapes",
+                    &format!("Edit to {file} is outside the approved plan files [{scope}], and this task's {MAX_SCOPE_ESCAPES} autonomous replans are used: change only the approved files."),
+                );
+                return Ok(None);
+            }
             self.task.phase = Phase::AwaitingInput;
             self.task.last_response = message.clone();
             self.event(message.clone());

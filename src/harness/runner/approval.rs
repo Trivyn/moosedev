@@ -109,6 +109,7 @@ impl Runner {
         self.task.check_results.clear();
         self.intent_event("plan_approved", "approved current source and knowledge");
         self.end_intent_cycle("approved");
+        self.progressed();
         self.event("Human approved the plan and entered Auto.");
         self.persist()
     }
@@ -187,7 +188,7 @@ impl Runner {
 
     async fn submit_message_inner(&mut self, id: Option<&str>, text: String) -> Result<()> {
         anyhow::ensure!(
-            self.task.phase != Phase::Complete,
+            !self.task.phase.is_finished(),
             "start a new task after completion"
         );
         anyhow::ensure!(
@@ -283,6 +284,7 @@ impl Runner {
                 "Discarded the pending spec preview because the human supplied new guidance.",
             );
         }
+        self.progressed();
         self.event(format!("Human response: {text}"));
         if let Some(id) = id {
             self.task.delivered_messages.push(id.to_owned());
@@ -315,7 +317,7 @@ impl Runner {
         self.discard_pending_choice("new human guidance replaced the question")?;
         self.task.completion_pending = false;
         self.task.check_results.clear();
-        self.task.final_capture = false;
+        self.abandon_task_end();
         if self.task.mode == Mode::Auto {
             // Steering takes approved work back to Plan: not a scope escape.
             if let Some(state) = self.task.symbolic.as_mut() {
@@ -447,7 +449,7 @@ impl Runner {
             "cancelled task cleanup is pending; retry cancel or resume before replanning"
         );
         anyhow::ensure!(
-            self.task.phase != Phase::Complete
+            !self.task.phase.is_finished()
                 && self.task.pending_capture.is_none()
                 && self.task.capture_request.is_none(),
             "resolve pending knowledge review before replanning"
@@ -470,7 +472,7 @@ impl Runner {
         self.discard_pending_permission("human returned the task to Plan")?;
         self.discard_pending_choice("human returned the task to Plan")?;
         self.task.completion_pending = false;
-        self.task.final_capture = false;
+        self.abandon_task_end();
         self.task.check_results.clear();
         self.task.after_review = Phase::Planning;
         if self.overflowed() {
@@ -500,6 +502,7 @@ impl Runner {
             self.task.phase == Phase::AwaitingInput && !text.trim().is_empty(),
             "no question awaiting an answer"
         );
+        self.progressed();
         self.event(format!("Human response: {text}"));
         self.end_unchanged_window();
         self.forget_failure();

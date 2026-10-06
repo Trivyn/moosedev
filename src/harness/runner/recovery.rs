@@ -188,6 +188,7 @@ impl Runner {
         } else {
             RecoveryStatus::Retrying
         };
+        let purpose_now = repair.purpose.clone();
         let stage = match repair.purpose.as_str() {
             "harness_action" => "action",
             "harness_capture_note" => "capture note",
@@ -223,10 +224,27 @@ impl Runner {
                 repair.diagnostic
             )
         };
+        // Recover, don't park (AD ad50c9cd): a rejected action the repairs
+        // could not fix is the model stuck, so the harness continues with the
+        // diagnostic as guidance and the advance asks again.
+        if exhausted && purpose_now == "harness_action" && super::recover::recover_enabled() {
+            self.intent_event(
+                if repeat_parked {
+                    "repair_repeat_parked"
+                } else {
+                    "repair_exhausted"
+                },
+                &purpose_now,
+            );
+            self.event(message.clone());
+            self.recover("rejected output", &message);
+            self.persist()?;
+            return Ok(true);
+        }
         if exhausted {
             self.task.phase = Phase::AwaitingInput;
             self.task.last_response = message.clone();
-            let purpose = repair.purpose.clone();
+            let purpose = purpose_now.clone();
             // A rejected action leaves the approved plan standing: a hint
             // answering it continues the plan. A capture-note park is not
             // about the plan's work and keeps its guidance path.

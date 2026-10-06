@@ -32,6 +32,11 @@ def review_input(state, episode):
         return {"terminal": "success", "cause": "success"}
     if phase == "Cancelled":
         return {"terminal": "agent_failure", "reason": "task cancelled", "cause": "cancelled"}
+    # The harness's best-effort finish after the model stayed stuck: the
+    # required checks did not pass (recover, don't park).
+    if phase == "Incomplete":
+        return {"terminal": "agent_failure", "reason": "task ended incomplete: the harness finished it as best it could",
+                "cause": "incomplete"}
     recovery = task.get("recovery") or {}
     if recovery.get("status") in {"generating", "retrying"}:
         return None

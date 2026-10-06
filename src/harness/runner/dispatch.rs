@@ -1,5 +1,6 @@
 //! One model step: refresh evidence, ask for one action, validate it, and
 //! execute the resulting step under the approval and policy gates.
+use super::recover;
 use super::*;
 
 /// What a served read is: a file outlined for space, one outside the step's
@@ -261,6 +262,17 @@ impl Runner {
             // Every retry would build the same prompt: stop for the human with
             // what outgrew the budget and what to do (Constraint 927d5176).
             if let Some(overflow) = error.downcast_ref::<model::PromptOverflow>() {
+                // Recover, don't park: the prompt cannot shrink by itself, so
+                // the harness finishes as best it can.
+                if recover::recover_enabled() {
+                    self.task.stuck_recoveries = recover::STUCK_CONTINUES;
+                    self.recover("context overflow", &overflow.guidance());
+                    // The recovery owns the error: the step is not failed.
+                    self.task.last_error = None;
+                    self.task.last_error_kind = None;
+                    self.persist()?;
+                    return Ok(());
+                }
                 self.task.last_response = overflow.guidance();
                 self.event(self.task.last_response.clone());
                 self.task.phase = Phase::AwaitingInput;
@@ -291,6 +303,16 @@ impl Runner {
                 error.downcast_ref::<crate::llm::CompletionError>()
             {
                 self.intent_event("response_size_exceeded", detail);
+                if recover::recover_enabled() {
+                    self.recover(
+                        "response too large",
+                        &format!("The model's response passed the size limit ({detail}). Write less at once: one file or one function per step."),
+                    );
+                    self.task.last_error = None;
+                    self.task.last_error_kind = None;
+                    self.persist()?;
+                    return Ok(());
+                }
                 self.task.last_response = format!(
                     "The model's response passed the size limit ({detail}); sending the same request again would repeat it. Guidance is needed: say what to write next, or /plan to split the work."
                 );
@@ -340,6 +362,21 @@ impl Runner {
         }
         if self.task.phase == Phase::Verifying {
             return self.verify_next().await;
+        }
+        // The step cap: no more model steps, so the harness finishes the task
+        // as best it can instead of stopping for the human.
+        if self.task.steps >= MAX_STEPS
+            && recover::recover_enabled()
+            && self.task.best_effort.is_none()
+        {
+            self.task.stuck_recoveries = recover::STUCK_CONTINUES;
+            self.recover(
+                "step cap",
+                &format!("The task reached {MAX_STEPS} model steps."),
+            );
+        }
+        if self.task.best_effort.is_some() {
+            return self.best_effort_finish().await;
         }
         if self.auto_fix_due() {
             return self.auto_apply_fix().await;
@@ -910,6 +947,25 @@ impl Runner {
     /// finish, the no-op continuation and the harness's own auto-verify all
     /// come through here.
     pub(super) async fn begin_verification(&mut self, summary: String) -> Result<()> {
+        // The best-effort finish runs the checks whatever the source holds:
+        // the gates that send the model back first are for a model that can
+        // still act on them.
+        if self.task.best_effort.is_none() && self.finish_gate_refused()? {
+            return self.persist();
+        }
+        self.task.last_response = summary;
+        self.refresh_code_index().await?;
+        if self.prepare_symbolic_associations().await? {
+            return Ok(());
+        }
+        self.task.phase = Phase::Verifying;
+        self.task.check_results.clear();
+        Ok(())
+    }
+
+    /// The finish's gates: settled diagnostics, then planned files missing
+    /// or unedited, then stubs. True when one sent the model back.
+    fn finish_gate_refused(&mut self) -> Result<bool> {
         // Settled language-server errors or lints: send the model back once
         // with them, before any check runs. A repeat finish on the same
         // result goes on to the checks, which decide.
@@ -938,22 +994,12 @@ impl Runner {
             self.task.last_response = format!(
                 "Not finished: the language server reports problems in the current source. Errors fail the required checks; fix them, and fix the warnings and lints too unless they are wrong for this code, then finish.\n{block}"
             );
-            return self.persist();
+            return Ok(true);
         }
         // Planned files missing or unedited, then stubs: each sends the model
         // back once for a source state; files still missing then ask the
         // human.
-        if self.refuse_unfinished_plan()? || self.refuse_stubbed_finish() {
-            return self.persist();
-        }
-        self.task.last_response = summary;
-        self.refresh_code_index().await?;
-        if self.prepare_symbolic_associations().await? {
-            return Ok(());
-        }
-        self.task.phase = Phase::Verifying;
-        self.task.check_results.clear();
-        Ok(())
+        Ok(self.refuse_unfinished_plan()? || self.refuse_stubbed_finish())
     }
 
     pub(super) fn apply_edit(&mut self, edit: PendingEdit) -> Result<()> {
@@ -976,6 +1022,7 @@ impl Runner {
         if self.is_approved_spec(&edit.file) {
             self.intent_event("spec_edited", &edit.file);
         }
+        self.progressed();
         self.event(format!(
             "Applied edit {}\nBefore:\n{}\nAfter:\n{}",
             edit.file,
@@ -1208,6 +1255,13 @@ impl Runner {
                 output: result.output.clone(),
             });
             if let Some(response) = failure {
+                // The best-effort finish: a failing check ends the task
+                // incomplete, with what it decided captured as unverified. An
+                // ungrantable denial stays the human's stop, below.
+                if self.task.best_effort.is_some() && !ungrantable {
+                    self.task.last_response = response;
+                    return self.capture_incomplete(&command).await;
+                }
                 // A denial that names nothing grantable is not a decision the
                 // model can make: no request_permission can be valid, and only
                 // the human can change the plan's checks. Park without a call.
@@ -1240,6 +1294,11 @@ impl Runner {
                 if denial.is_none() {
                     self.ask_missing_module_in_output(&result.output);
                 }
+                // The loop detector, through `note_failure`, may just have
+                // ended the recoveries: this failure is the best-effort one.
+                if self.task.best_effort.is_some() && !ungrantable {
+                    return self.capture_incomplete(&command).await;
+                }
                 self.task.capture_due = true;
                 self.task.after_review = Phase::Working;
             } else if let Some(reason) = vacuous_reason(&result) {
@@ -1257,7 +1316,11 @@ impl Runner {
                     .plan
                     .as_ref()
                     .is_some_and(|plan| !plan.stub_files().is_empty());
-                if !scaffold && self.vacuous_returns() < VACUOUS_RETURN_LIMIT {
+                // A best-effort finish has no model step left to add a test.
+                if !scaffold
+                    && self.task.best_effort.is_none()
+                    && self.vacuous_returns() < VACUOUS_RETURN_LIMIT
+                {
                     self.intent_event("check_vacuous_returned", &command);
                     self.task.phase = Phase::Working;
                     self.task.last_response = format!(
@@ -1613,7 +1676,7 @@ impl Runner {
         let changed = self.task.events[last + 1..].iter().any(|event| {
             let message = event.message.as_str();
             message.starts_with("Applied edit")
-                || review::is_human_progress(message)
+                || review::is_progress(message)
                 || message.starts_with("Task permission")
         });
         (!changed).then_some(last)
@@ -1631,7 +1694,7 @@ impl Runner {
             .iter()
             .rposition(|event| {
                 let message = event.message.as_str();
-                review::is_human_progress(message)
+                review::is_progress(message)
                     || message.starts_with("Applied edit")
                     || message.starts_with("Proposed plan: ")
             })
@@ -1693,16 +1756,14 @@ impl Runner {
             "without editing"
         };
         self.intent_event("search_repeat_parked", &listed);
-        self.event(format!(
-            "{SEARCH_REPEAT_PARKED} '{query}' parked for guidance."
-        ));
-        self.task.last_response = format!(
-            "The model keeps searching for {listed} {without}; project knowledge and the repository have nothing more on them. Guidance is needed: give the missing information, say to proceed on an assumption, or /plan to change the approach."
-        );
-        self.task.phase = Phase::AwaitingInput;
-        self.task.turn_finished = true;
         self.looking_parked = true;
-        self.park_under_approved_plan();
+        self.stop_stuck(
+            "search loop",
+            format!("{SEARCH_REPEAT_PARKED} '{query}' parked for guidance."),
+            format!(
+                "The model keeps searching for {listed} {without}; project knowledge and the repository have nothing more on them. Guidance is needed: give the missing information, say to proceed on an assumption, or /plan to change the approach."
+            ),
+        );
         true
     }
 
@@ -1742,7 +1803,7 @@ impl Runner {
             let message = earlier.message.as_str();
             if message == action {
                 found.push(index);
-            } else if review::is_human_progress(message)
+            } else if review::is_progress(message)
                 || (message.starts_with("Model action: ")
                     && !message.starts_with("Model action: {\"action\":\"inspect\""))
             {
@@ -1790,16 +1851,14 @@ impl Runner {
                 self.task.last_response = steer;
                 return true;
             }
-            self.event(format!(
-                "{INSPECT_REFUSED} parked for guidance (event {event}, offset {offset})."
-            ));
-            self.task.last_response = format!(
-                "The model keeps asking for pages of journal event {event} it already had, without acting on them. Guidance is needed: say what to do next, or /plan to change the approach."
-            );
-            self.task.phase = Phase::AwaitingInput;
-            self.task.turn_finished = true;
             self.looking_parked = true;
-            self.park_under_approved_plan();
+            self.stop_stuck(
+                "inspect loop",
+                format!("{INSPECT_REFUSED} parked for guidance (event {event}, offset {offset})."),
+                format!(
+                    "The model keeps asking for pages of journal event {event} it already had, without acting on them. Guidance is needed: say what to do next, or /plan to change the approach."
+                ),
+            );
             return true;
         }
         let next = if self.task.mode == Mode::Plan {
@@ -1900,14 +1959,14 @@ impl Runner {
                 self.task.last_response = steer;
                 return;
             }
-            self.event(format!("{READ_REFUSED} parked for guidance ({file})."));
-            self.task.last_response = format!(
-                "The model keeps asking to read files whose current text it already has ({file} last), without planning or editing. Guidance is needed: say what to do next, or /plan to change the approach."
-            );
-            self.task.phase = Phase::AwaitingInput;
-            self.task.turn_finished = true;
             self.looking_parked = true;
-            self.park_under_approved_plan();
+            self.stop_stuck(
+                "read loop",
+                format!("{READ_REFUSED} parked for guidance ({file})."),
+                format!(
+                    "The model keeps asking to read files whose current text it already has ({file} last), without planning or editing. Guidance is needed: say what to do next, or /plan to change the approach."
+                ),
+            );
             return;
         }
         let message = format!("{READ_REFUSED} {reason}");
@@ -1935,7 +1994,7 @@ impl Runner {
                 let guarded_edit = ["First-edit guard:", "Edit guard:", "Fix guard:"]
                     .iter()
                     .any(|guard| message.starts_with(guard));
-                !(review::is_human_progress(message)
+                !(review::is_progress(message)
                     || message.starts_with("Applied edit")
                     || guarded_edit
                     || (message.starts_with("Model action: ") && !looking))
@@ -2040,13 +2099,13 @@ impl Runner {
             let message = format!(
                 "The model keeps proposing a command that already ran at event {event} with nothing changed since, so it would print the same output:\n{command}\nGuidance is needed: say what to try instead, grant what it lacks, or /plan to change the approach."
             );
-            self.event(format!(
-                "Not run: this exact command repeated again; parked for guidance (event {event})."
-            ));
-            self.task.last_response = message;
-            self.task.phase = Phase::AwaitingInput;
-            self.task.turn_finished = true;
-            self.park_under_approved_plan();
+            self.stop_stuck(
+                "command repeat",
+                format!(
+                    "Not run: this exact command repeated again; parked for guidance (event {event})."
+                ),
+                message,
+            );
             return true;
         }
         let message = format!(
@@ -2076,7 +2135,7 @@ impl Runner {
             .task
             .events
             .iter()
-            .rposition(|event| review::is_human_progress(&event.message))
+            .rposition(|event| review::is_progress(&event.message))
             .map_or(0, |index| index + 1);
         let now = (self.task.edits.len(), self.task.check_results.len());
         let progressed = self
@@ -2460,10 +2519,21 @@ mod human_progress_tests {
         let before = runner.task.events.len() - 1;
         let run: Vec<usize> = runner.looking_run(before).map(|(index, _)| index).collect();
         assert!(run.contains(&refused), "{run:?}");
-        // So a second refused read parks, as it does with no checkpoint.
+        // So a second refused read stops the loop, as it does with no
+        // checkpoint: the harness recovers, which ends the run.
         runner.refuse_read("src/parse.rs", "`src/parse.rs` is current");
-        assert_eq!(runner.task.phase, Phase::AwaitingInput);
-        // A human answer ends the run.
+        assert_ne!(runner.task.phase, Phase::AwaitingInput);
+        assert!(runner
+            .task
+            .events
+            .last()
+            .unwrap()
+            .message
+            .starts_with("Harness recovery (read loop, 1 of 2)"));
+        runner.event(read);
+        let before = runner.task.events.len() - 1;
+        assert_eq!(runner.looking_run(before).count(), 0);
+        // A human answer ends the run too.
         runner.event(ANSWER);
         runner.event(read);
         let before = runner.task.events.len() - 1;

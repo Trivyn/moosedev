@@ -1443,6 +1443,22 @@ impl Drop for ServeShownOff {
     }
 }
 
+/// Sets `MOOSEDEV_HARNESS_RECOVER=off` for a test's life: a model-stuck
+/// stop parks for the human, as before recover-don't-park (AD ad50c9cd), so
+/// a test can check the park's detection and message. Hold `ENVIRONMENT`.
+pub(super) struct RecoverOff;
+impl RecoverOff {
+    pub(super) fn set() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_RECOVER", "off");
+        Self
+    }
+}
+impl Drop for RecoverOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_RECOVER");
+    }
+}
+
 /// Sets `MOOSEDEV_HARNESS_OBJECTIVE_GATHER=off` for a test's life: Plan mode
 /// sends no search of the objective's words of its own, so a test can count
 /// the model's searches alone. Hold `ENVIRONMENT`.

@@ -426,6 +426,20 @@ impl Runner {
                 "stalled_failure_parked",
                 &format!("{what}, {count} times at edit {edits}: {command}"),
             );
+            // Recover, don't park: the harness continues with the facts in
+            // front of the output (AD ad50c9cd).
+            if super::super::recover::recover_enabled() {
+                let message = match revisited {
+                    Some(at) => format!(
+                        "The same failure ({what}) has come back {count} times, the last with the source exactly as it was at event {at}: the edits since have gone back and forth without changing the result. Decide which side is wrong, the test or the code it exercises, and change that."
+                    ),
+                    None => format!(
+                        "The same failure ({what}) has come back {count} times with no edit in between; rerunning, reading and paging have not changed it. Change the code or the test it exercises."
+                    ),
+                };
+                self.recover("fix loop", &message);
+                return None;
+            }
             self.event(if revisited.is_some() {
                 format!(
                     "Stalled failure: {what} came back {count} times as the source went back and forth; parked for guidance."

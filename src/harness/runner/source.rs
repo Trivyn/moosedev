@@ -947,7 +947,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_prompt_that_cannot_fit_stops_for_the_human_before_any_request() {
+    async fn a_prompt_that_cannot_fit_finishes_as_best_it_can_before_any_request() {
         let project = Project::new("source-overflow");
         // The file the model just read is too large to show in full.
         let (mut runner, server) = runner_with(&project, &[("huge.rs", module(300))]).await;
@@ -957,18 +957,22 @@ mod tests {
         let overflow = error.downcast_ref::<PromptOverflow>().unwrap();
         assert_eq!(overflow.file.as_ref().unwrap().0, "huge.rs");
 
-        // The protected part alone is over the budget: advance stops the task
-        // with the sizes and what to do, and asks no model.
+        // The protected part alone is over the budget: no retry can shrink
+        // it, so advance asks no model and goes straight to the best-effort
+        // finish, journaling the sizes and what to do (AD ad50c9cd).
         runner.task.source.clear();
         runner.task.read_files.clear();
         runner.task.objective = "x".repeat(120_000);
         runner.advance().await.unwrap();
-        assert_eq!(runner.task.phase, Phase::AwaitingInput);
-        assert_eq!(
-            runner.task.last_error_kind.as_deref(),
-            Some("context_overflow")
-        );
-        let guidance = &runner.task.last_response;
+        assert_ne!(runner.task.phase, Phase::AwaitingInput);
+        assert_eq!(runner.task.best_effort.as_deref(), Some("context overflow"));
+        // The recovery owns the error: the step is not reported failed.
+        assert!(runner.task.last_error.is_none() && runner.task.last_error_kind.is_none());
+        let recovery = &runner.task.events.last().unwrap().message;
+        let guidance = recovery
+            .split_once("best it can. ")
+            .map(|(_, facts)| facts)
+            .unwrap_or_default();
         assert!(
             guidance.starts_with("Stopped before asking the model"),
             "{guidance}"
@@ -982,9 +986,17 @@ mod tests {
             "{guidance}"
         );
         assert!(runner.task.model_requests.is_empty());
+        // In Plan mode there is nothing to verify: the task ends incomplete.
+        runner.advance().await.unwrap();
+        assert_eq!(runner.task.phase, Phase::Incomplete);
+        assert!(runner.task.model_requests.is_empty());
 
-        // The answer returns the task to Plan with an empty working set, so it
-        // does not build the same prompt again, even from Auto.
+        // With recovery switched off the overflow parks; the answer then
+        // returns the task to Plan with an empty working set, so it does not
+        // build the same prompt again, even from Auto.
+        runner.task.phase = Phase::AwaitingInput;
+        runner.task.best_effort = None;
+        runner.task.last_error_kind = Some("context_overflow".into());
         runner.task.mode = super::super::Mode::Auto;
         runner.task.read_files.push("a.rs".into());
         runner.task.source.insert("a.rs".into(), Some(module(1)));

@@ -62,6 +62,7 @@ impl Runner {
                 && self.task.intent_refresh_pending.is_empty()
                 && !self.task.capture_due
                 && !self.task.final_capture
+                && !self.task.incomplete_capture
                 && !self.task.completion_pending
                 && self
                     .task

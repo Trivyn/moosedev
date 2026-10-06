@@ -741,8 +741,68 @@ async fn approve_spec_starts_a_task_when_none_is_active() {
     handle.await.unwrap();
 }
 
+/// Serializes the tests that set `MOOSEDEV_HARNESS_RECOVER`.
+static ENVIRONMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Sets `MOOSEDEV_HARNESS_RECOVER=off` for a test's life: a model-stuck stop
+/// parks for the human, as before recover-don't-park (AD ad50c9cd).
+struct RecoverOff;
+impl RecoverOff {
+    fn set() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_RECOVER", "off");
+        Self
+    }
+}
+impl Drop for RecoverOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_RECOVER");
+    }
+}
+
+/// Recover, don't park: a spent repair budget is the model stuck, so the
+/// harness continues with the diagnostic as guidance and the task goes on
+/// without a human message.
+#[tokio::test]
+async fn a_spent_repair_budget_recovers_and_the_task_goes_on() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    fixture.state.release.add_permits(1);
+    let invalid =
+        |n: usize| json!({"message":"Working.","action":{"action":format!("invented_action_{n}")}});
+    *fixture.state.replies.lock().unwrap() = VecDeque::from([
+        invalid(1),
+        invalid(2),
+        invalid(3),
+        json!({"message":"Recovered.","action":{"action":"reply","message":"Recovered answer."}}),
+    ]);
+    let (input, mut updates, handle) = fixture.controller(Conversation::new(fixture.root.clone()));
+    until(&mut updates, |state| !state.busy).await;
+    input
+        .send(Command::Input("Explain the project.".into()))
+        .unwrap();
+    let finished =
+        until(&mut updates, |state| {
+            !state.busy
+                && state.conversation.messages.iter().any(|message| {
+                    message.role == "assistant" && message.text == "Recovered answer."
+                })
+        })
+        .await;
+    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 4);
+    // The reply waits for the human, as any answer does; no park came first.
+    let task = finished.task.unwrap();
+    assert!(task.recovery.is_none());
+    assert!(task.events.iter().any(|event| event
+        .message
+        .starts_with("Harness recovery (rejected output, 1 of 2)")));
+    input.send(Command::Quit).unwrap();
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn a_spent_repair_budget_shows_its_request_and_continue_explains() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     fixture.state.release.add_permits(1);
     // Different invalid candidates: identical ones stop at two (the repair

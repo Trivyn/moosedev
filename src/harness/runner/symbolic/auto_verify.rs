@@ -73,6 +73,8 @@ impl Runner {
             && !task.turn_finished
             && !task.completion_pending
             && !task.final_capture
+            && !task.incomplete_capture
+            && task.best_effort.is_none()
     }
 
     fn diagnostics_clean(&self) -> bool {

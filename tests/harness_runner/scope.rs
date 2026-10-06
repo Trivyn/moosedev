@@ -179,6 +179,7 @@ async fn a_read_outside_the_scope_of_a_file_changed_since_it_was_served_is_serve
 #[tokio::test]
 async fn a_read_outside_the_scope_joins_the_working_set_once_the_last_result_moved_on() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // These cover the refusal of a file shown in full, which a first read
     // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
     let _serve_off = ServeShownOff::set();

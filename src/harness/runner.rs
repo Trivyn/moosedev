@@ -37,6 +37,7 @@ mod model;
 mod permissions;
 mod plan_choices;
 mod plan_view;
+mod recover;
 mod recovery;
 mod review;
 mod rule_state;
@@ -408,6 +409,9 @@ impl Runner {
             capture_operations: vec![],
             capture_cursor: 0,
             completion_pending: false,
+            best_effort: None,
+            incomplete_capture: false,
+            stuck_recoveries: 0,
             cleanup_pending: false,
             source: BTreeMap::new(),
             source_recency: Vec::new(),

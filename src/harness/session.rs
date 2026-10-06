@@ -70,7 +70,7 @@ impl ConversationSummary {
     pub fn unfinished(&self) -> bool {
         self.task.as_ref().is_some_and(|task| {
             task.as_ref().is_some_and(|task| {
-                task.schema == super::runner::SCHEMA && task.phase != Phase::Complete
+                task.schema == super::runner::SCHEMA && !task.phase.is_finished()
             })
         })
     }
@@ -628,7 +628,7 @@ impl Controller {
     async fn interrupt(&mut self) {
         self.auto = false;
         if let Some(runner) = &mut self.runner {
-            if runner.task.phase == Phase::Complete
+            if runner.task.phase.is_finished()
                 || (runner.task.phase == Phase::Cancelled && !runner.task.cleanup_pending)
             {
                 return;
@@ -894,7 +894,7 @@ impl Controller {
         if self
             .runner
             .as_ref()
-            .is_some_and(|r| r.task.phase == Phase::Complete)
+            .is_some_and(|r| r.task.phase.is_finished())
         {
             self.runner = None;
         }
@@ -1287,7 +1287,7 @@ impl Controller {
                         let finished = self
                             .runner
                             .as_ref()
-                            .is_some_and(|runner| runner.task.phase == Phase::Complete);
+                            .is_some_and(|runner| runner.task.phase.is_finished());
                         if self.runner.is_none() || finished {
                             self.acquire()?;
                             self.start_task(spec_approval_objective(path)).await?;
@@ -1436,6 +1436,7 @@ impl Controller {
                         Phase::AwaitingChoice => bail!("Nothing is interrupted; /choose answers the displayed question, or send guidance."),
                         Phase::AwaitingReview => bail!("Nothing is interrupted; /accept, /reject or /no-knowledge resolves the displayed review."),
                         Phase::Complete => bail!("Task complete. Describe the next request to continue this conversation."),
+                        Phase::Incomplete => bail!("Task ended incomplete. Describe the next request to continue this conversation."),
                     },
                     _ => unreachable!(),
                 }

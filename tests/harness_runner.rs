@@ -2496,6 +2496,8 @@ async fn interactive_greeting_and_model_question_fit_a_populated_project() {
 
 #[tokio::test]
 async fn interactive_oversized_governing_evidence_blocks_before_model_call() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     fixture.shared.lock().unwrap().context = Some(
         "Constraint: This complete governing evidence cannot be silently discarded.\n".repeat(1500),
@@ -3212,6 +3214,8 @@ async fn a_long_plan_is_accepted_and_each_step_sees_the_part_it_needs() {
 
 #[tokio::test]
 async fn a_plan_over_the_output_bound_is_refused_with_its_size() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     let summary = "x".repeat(70_000);
@@ -3230,6 +3234,8 @@ async fn a_plan_over_the_output_bound_is_refused_with_its_size() {
 
 #[tokio::test]
 async fn alternating_inspects_of_the_same_pages_are_refused_then_parked() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // badciv f2fe1f61: qwen alternated inspect(137, 0) and inspect(137, 1776)
     // 132 times; journal events never change, so a repeat is a loop.
     let fixture = Fixture::new().await;
@@ -3325,6 +3331,7 @@ impl Drop for ServeOutlinedOff {
 #[tokio::test]
 async fn an_outlined_file_read_again_is_served_without_rotating_the_tiers() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = outlined_a(&fixture).await;
     let read_files = runner.task.read_files.clone();
@@ -3450,6 +3457,7 @@ async fn an_edit_after_an_outlined_file_was_served_whole_applies() {
 #[tokio::test]
 async fn alternating_served_reads_of_two_outlined_files_park() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     for name in ["a.rs", "b.rs", "c.rs"] {
         std::fs::write(fixture.root.join(name), big_source(name)).unwrap();
@@ -3493,6 +3501,7 @@ async fn serving_outlined_reads_switched_off_refuses_them_then_parks() {
     // badciv 40cef4a5: the crate was larger than the source budget, and each
     // read outlined the file qwen read next, for about 40 planning steps.
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // These cover the refusal of a file shown in full, which a first read
     // of it now gets served instead (MOOSEDEV_HARNESS_SERVE_SHOWN).
     let _serve_off = ServeShownOff::set();
@@ -3617,6 +3626,7 @@ async fn a_file_shown_in_full_is_not_read_again_and_the_planner_is_told_to_plan(
 #[tokio::test]
 async fn a_read_of_a_file_shown_in_full_is_served_once() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     let read = json!({"action":"read","file":"code.txt"});
@@ -4379,6 +4389,8 @@ async fn malformed_and_fragment_edit_share_one_budget_and_apply_once() {
 
 #[tokio::test]
 async fn invalid_replacements_exhaust_without_write_and_restart_cannot_refill() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     use moosedev::harness::runner::RecoveryStatus;
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;
@@ -4586,6 +4598,8 @@ async fn a_replace_that_matches_nowhere_names_the_first_absent_line() {
 
 #[tokio::test]
 async fn cancellation_during_generation_preserves_charged_candidate_on_resume() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.approved_interactive().await;
     let received = Arc::new(tokio::sync::Notify::new());
@@ -4976,6 +4990,7 @@ async fn a_repeated_query_is_answered_without_re_running_it() {
 #[tokio::test]
 async fn a_search_asked_again_after_its_stored_answer_parks() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // Counts the model's searches alone.
     let _gather_off = GatherOff::set();
     let fixture = Fixture::new().await;
@@ -5039,6 +5054,7 @@ async fn a_search_asked_again_after_its_stored_answer_parks() {
 #[tokio::test]
 async fn a_query_holding_the_answers_words_is_counted_as_itself() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     let odd = "a' in this task;b";
@@ -5179,6 +5195,7 @@ async fn planning_starts_with_what_the_objectives_words_match() {
 #[tokio::test]
 async fn a_looking_park_says_what_the_model_is_missing() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     for (answer, switch_on) in [
         (json!({"missing":["the yield table values"]}), true),
         (json!({"missing":[]}), true),
@@ -5225,6 +5242,327 @@ async fn a_looking_park_says_what_the_model_is_missing() {
             );
         }
     }
+}
+
+/// Recover, don't park (AD ad50c9cd): a model stuck in a search loop is the
+/// harness's to recover from, not the human's. The harness continues twice
+/// with the loop's facts as guidance, then finishes as best it can; in Plan
+/// mode, with no approved plan to verify, the task ends incomplete with
+/// nothing captured. It never waits for the human.
+#[tokio::test]
+async fn a_stuck_search_loop_recovers_twice_then_ends_incomplete() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for ask in 1..=7 {
+        fixture.conversational(json!({"action":"search","query":"original"}));
+        // The model is asked what it is missing at each recovery; naming
+        // nothing leaves the recovery standing.
+        if ask == 3 || ask == 5 {
+            fixture.reply("harness_missing", json!({"missing":[]}));
+        }
+        runner.advance().await.unwrap();
+        assert_ne!(
+            runner.task.phase,
+            Phase::AwaitingInput,
+            "ask {ask}: {}",
+            runner.task.last_response
+        );
+    }
+    let recoveries: Vec<&str> = runner
+        .task
+        .events
+        .iter()
+        .map(|event| event.message.as_str())
+        .filter(|message| message.starts_with("Harness recovery"))
+        .collect();
+    assert_eq!(recoveries.len(), 3, "{recoveries:?}");
+    assert!(recoveries[0].starts_with(
+        "Harness recovery (search loop, 1 of 2): The model keeps searching for 'original'"
+    ));
+    assert!(recoveries[1].starts_with("Harness recovery (search loop, 2 of 2)"));
+    assert!(recoveries[2].contains("still stuck after 2 recoveries"));
+    // The next advance finishes as best it can, without a model call.
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls);
+    assert_eq!(runner.task.phase, Phase::Incomplete);
+    assert!(runner.task.phase.is_finished());
+    let last = &runner.task.events.last().unwrap().message;
+    assert!(
+        last.starts_with("Incomplete: the model stayed stuck (search loop). No required check ran. Nothing was captured"),
+        "{last}"
+    );
+    assert_eq!(
+        intent_details(&runner, "task_incomplete"),
+        vec!["search loop"]
+    );
+}
+
+/// What only the human holds is the human's stop: at a recovery, a model that
+/// names missing information parks with the list instead of continuing.
+#[tokio::test]
+async fn a_recovery_that_names_missing_information_parks_for_the_human() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for ask in 1..=3 {
+        fixture.conversational(json!({"action":"search","query":"original"}));
+        if ask == 3 {
+            fixture.reply(
+                "harness_missing",
+                json!({"missing":["the yield table's food values"]}),
+            );
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("The model needs information the project does not hold:\n- the yield table's food values\nGuidance is needed"));
+    assert!(runner.task.events.iter().any(|event| event.message
+        == "Harness recovery set aside: the model named information only the human holds."));
+}
+
+/// The model's own question is the human's stop: recovery leaves it waiting.
+#[tokio::test]
+async fn a_model_question_still_waits_with_recovery_on() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(
+        json!({"action":"question","question":"Which file holds the yield table?"}),
+    );
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|event| event.message.starts_with("Harness recovery")));
+}
+
+/// `runner`'s task as journaled with its step count at the cap, reloaded.
+fn at_the_step_cap(fixture: &Fixture, runner: Runner) -> Runner {
+    let id = runner.task.id.clone();
+    drop(runner);
+    let journal = fixture
+        .root
+        .join(format!(".moosedev/harness/tasks/{id}.json"));
+    let mut value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&journal).unwrap()).unwrap();
+    value["steps"] = json!(256);
+    std::fs::write(&journal, serde_json::to_string(&value).unwrap()).unwrap();
+    reload(fixture, &id)
+}
+
+/// The step cap allows no more model steps, so it goes straight to the
+/// best-effort finish: in Plan mode the task ends incomplete without a call.
+#[tokio::test]
+async fn the_step_cap_goes_straight_to_the_best_effort_finish() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let runner = fixture.interactive().await;
+    let mut runner = at_the_step_cap(&fixture, runner);
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+    assert_eq!(fixture.model_calls(), calls);
+    assert_eq!(runner.task.phase, Phase::Incomplete);
+    assert_eq!(
+        intent_details(&runner, "best_effort_finish_due"),
+        vec!["step cap"]
+    );
+    assert_eq!(intent_details(&runner, "task_incomplete"), vec!["step cap"]);
+}
+
+/// A required check the sandbox blocks with nothing to grant stays the
+/// human's stop during a best-effort finish: only the human can change the
+/// plan's checks, so the task waits instead of ending incomplete.
+#[tokio::test]
+async fn an_ungrantable_check_in_a_best_effort_finish_still_waits() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let check = "sh -c 'echo Operation not permitted; exit 1'";
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":[check]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    let mut runner = at_the_step_cap(&fixture, runner);
+    for _ in 0..4 {
+        if runner.task.phase == Phase::AwaitingInput || runner.task.phase.is_finished() {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(intent_details(&runner, "check_ungrantable"), vec![check]);
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    assert!(intent_details(&runner, "best_effort_check_failed").is_empty());
+}
+
+/// A best-effort finish whose required checks all pass completes the task
+/// as usual, with the usual final capture.
+#[tokio::test]
+async fn a_best_effort_finish_whose_checks_pass_completes() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let runner = fixture.approved_interactive().await;
+    let mut runner = at_the_step_cap(&fixture, runner);
+    fixture.note("Nothing beyond the diff.");
+    fixture.typed(vec![]);
+    for _ in 0..6 {
+        if runner.task.phase.is_finished() || runner.task.phase == Phase::AwaitingReview {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    if runner.task.phase == Phase::AwaitingReview {
+        let prompt = fixture.last_model_prompt("harness_capture_note");
+        assert!(
+            !prompt.contains("stopped before its required checks passed"),
+            "{prompt}"
+        );
+        runner.confirm_no_knowledge().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::Complete);
+    assert_eq!(
+        intent_details(&runner, "best_effort_verify"),
+        vec!["step cap"]
+    );
+    assert!(intent_details(&runner, "task_incomplete").is_empty());
+}
+
+/// An Auto task stuck on a repeated command until its best-effort finish ran
+/// the plan's failing check (`false`): at the incomplete capture's review.
+async fn at_an_incomplete_review(fixture: &Fixture) -> Runner {
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"plan","summary":"Make a localized repair","files":["code.txt"],"checks":["false"]}));
+    runner.advance().await.unwrap();
+    runner.approve_plan().await.unwrap();
+    async fn act(fixture: &Fixture, runner: &mut Runner, action: Value) {
+        fixture.conversational(action);
+        for _ in 0..4 {
+            if fixture.shared.lock().unwrap().replies.is_empty() {
+                return;
+            }
+            runner.advance().await.unwrap();
+        }
+    }
+    // A command repeated with nothing changed: run, refused, stuck; three
+    // times, the last ending the recoveries.
+    for _ in 0..9 {
+        act(
+            fixture,
+            &mut runner,
+            json!({"action":"command","command":"true"}),
+        )
+        .await;
+        assert_ne!(
+            runner.task.phase,
+            Phase::AwaitingInput,
+            "{}",
+            runner.task.last_response
+        );
+    }
+    assert_eq!(
+        intent_details(&runner, "best_effort_finish_due"),
+        vec!["command repeat"]
+    );
+    // The best-effort finish: verification, the failing check, the
+    // incomplete capture.
+    fixture.note("The repair was planned for code.txt; nothing was changed yet.");
+    fixture.typed(vec![]);
+    for _ in 0..6 {
+        if runner.task.phase == Phase::AwaitingReview {
+            break;
+        }
+        runner.advance().await.unwrap();
+    }
+    assert_eq!(runner.task.phase, Phase::AwaitingReview);
+    runner
+}
+
+/// In Auto, the best-effort finish runs the plan's required checks; one that
+/// fails captures what the task decided as unverified, and the task ends
+/// incomplete once the review is resolved.
+#[tokio::test]
+async fn a_best_effort_finish_with_a_failing_check_captures_unverified_and_ends_incomplete() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = at_an_incomplete_review(&fixture).await;
+    let prompt = fixture.last_model_prompt("harness_capture_note");
+    assert!(
+        prompt.contains("stopped before its required checks passed"),
+        "{prompt}"
+    );
+    let note = runner
+        .task
+        .events
+        .iter()
+        .find(|event| event.message.starts_with("Capture note:"))
+        .unwrap()
+        .message
+        .clone();
+    assert!(
+        note.starts_with(
+            "Capture note: Unverified: the task ended before its required checks passed (`false`)."
+        ),
+        "{note}"
+    );
+    assert!(runner.task.at_final_review(), "the human may send it back");
+    runner.confirm_no_knowledge().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::Incomplete);
+    let last = &runner.task.events.last().unwrap().message;
+    assert!(
+        last.starts_with("Incomplete: the model stayed stuck (command repeat). Failing required checks: `false`. What the task decided was captured as unverified."),
+        "{last}"
+    );
+}
+
+/// New guidance at the incomplete review leaves the task's end: once the
+/// review is resolved the task follows the guidance back to Plan instead of
+/// ending incomplete, and the old note no longer stands.
+#[tokio::test]
+async fn steering_at_an_incomplete_review_returns_to_plan() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = at_an_incomplete_review(&fixture).await;
+    runner
+        .submit_message("Plan it differently: edit code.txt first.".into())
+        .await
+        .unwrap();
+    if runner.task.phase == Phase::AwaitingReview {
+        runner.confirm_no_knowledge().await.unwrap();
+    }
+    assert_ne!(runner.task.phase, Phase::Incomplete);
+    assert!(!runner.task.phase.is_finished());
+    assert!(intent_details(&runner, "task_incomplete").is_empty());
+    assert!(!runner.task.at_final_review());
+}
+
+/// Sent back at the incomplete review, the task goes on: the best-effort
+/// finish is called off and the model works with the human's note.
+#[tokio::test]
+async fn an_incomplete_task_sent_back_at_review_goes_on() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = at_an_incomplete_review(&fixture).await;
+    runner
+        .rework("The check fails because code.txt still says original; change it.".into())
+        .await
+        .unwrap();
+    assert_eq!(runner.task.phase, Phase::Working);
+    assert!(!runner.task.at_final_review());
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    let calls = fixture.model_calls();
+    runner.advance().await.unwrap();
+
+    assert!(fixture.model_calls() > calls, "the model is asked again");
+    assert_ne!(runner.task.phase, Phase::Incomplete);
 }
 
 /// The index refresh at finish is journaled, never fatal, and off when the

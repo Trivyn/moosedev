@@ -29,6 +29,13 @@ class CauseTableTests(unittest.TestCase):
         self.assertNotEqual(classify({"status": "success", "returncode": 0}, task, final, state())[0], "success")
         self.assertNotEqual(classify({"status": "agent_failure", "returncode": 0}, task, final, state(closed_seen=True))[0], "success")
 
+    def test_incomplete_is_its_own_cause_outside_the_sealed_sets(self):
+        final = {"terminal": "agent_failure", "cause": "incomplete"}
+        task = {"phase": "Incomplete", "best_effort": "search loop"}
+        self.assertEqual(classify({"status": "agent_failure", "returncode": 0}, task, final, state(closed_seen=True)),
+                         ("incomplete", "search loop"))
+        self.assertNotIn("incomplete", TERMINAL_CAUSES)
+
     def test_row3_awaiting_guidance_is_model_repair_exhausted(self):
         task = {"phase": "AwaitingInput", "last_error": "bad edit", "last_error_kind": "controller_invariant",
                 "recovery": {"status": "awaiting_guidance", "purpose": "harness_action"}}

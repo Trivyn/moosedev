@@ -412,6 +412,7 @@ class ReviewerControls(unittest.TestCase):
         self.assertEqual(reviewer.review_input(self.state("Complete"), self.episode),
                          {"terminal": "success", "cause": "success"})
         self.assertEqual(reviewer.review_input(self.state("Cancelled"), self.episode)["terminal"], "agent_failure")
+        self.assertEqual(reviewer.review_input(self.state("Incomplete"), self.episode)["cause"], "incomplete")
         errored = self.state("AwaitingInput", last_error="capture unavailable")
         self.assertEqual(reviewer.review_input(errored, self.episode)["reason"], "capture unavailable")
         first = reviewer.review_input(self.state("AwaitingInput"), self.episode)

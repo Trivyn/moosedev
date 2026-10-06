@@ -1155,6 +1155,30 @@ the human ("The model needs information the project does not hold"), with the
 park's own line after it; an empty one leaves the park as it was; a failed
 request is journaled (`missing_failed`) and the park stands
 (`missing_asked`). `MOOSEDEV_HARNESS_ASK_MISSING=off` parks without asking.
+Recover, don't park (AD ad50c9cd). Only a stop the human owns waits for the
+human: a permission, plan approval and capture review, information only the
+human holds, a provider refusal, an environment the harness cannot fix. A
+model-stuck stop recovers instead: the read, inspect, search and command loops,
+the loop detector's repeated failure, output the repairs could not fix, a
+response past the size limit, exhausted scope escapes, a finish with planned
+work still unedited, the step cap and a prompt that cannot fit. The harness
+continues by itself twice (`stuck_recovered`, journaled "Harness recovery
+(kind, n of 2): …"): the stop's facts become the guidance, and what a human
+answer resets is reset, except the step count. The loop guards count a
+harness recovery as progress, as they count a human answer; an applied edit,
+plan approval or a human answer restarts the count. After two, the next
+advance finishes as best it can (`best_effort_finish_due`): with an approved
+plan in Auto, the plan's required checks run without the finish's gates; all
+passing completes the task as usual, and a failure captures what the task
+decided as unverified (the note opens "Unverified: the task ended before its
+required checks passed", asked by its own question) and, once the review is
+resolved, ends the task in the terminal phase `Incomplete` (`task_incomplete`).
+Without an approved plan the task ends `Incomplete` at once, with nothing
+captured. The step cap and a prompt that cannot fit go straight to the
+best-effort finish. When the model, asked what it is missing at a looking
+stop, names information the project does not hold, that is the human's stop:
+the task parks with the list. `MOOSEDEV_HARNESS_RECOVER=off` parks every
+model-stuck stop for the human, as before.
 Consecutive searches matching
 nothing are counted: the second states that the channel is exhausted and names
 the actions the current mode still offers. The final checkpoint

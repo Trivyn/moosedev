@@ -49,7 +49,12 @@ impl Runner {
         let Some(plan) = self.task.plan.as_ref() else {
             return facts;
         };
-        if !self.task.check_results.is_empty() {
+        if self.task.incomplete_capture {
+            facts.push(format!(
+                "Required checks failed: {}. The task ended incomplete; its records are unverified.",
+                self.failing_checks().join("; ")
+            ));
+        } else if !self.task.check_results.is_empty() {
             let passed: u64 = self
                 .task
                 .check_results

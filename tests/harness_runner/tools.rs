@@ -247,6 +247,8 @@ async fn a_new_upstream_provider_is_journaled() {
 /// repeat it, so the step parks with what happened instead of being resent.
 #[tokio::test]
 async fn a_response_past_the_size_limit_parks() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     let huge = "x".repeat(5 * 1024 * 1024);

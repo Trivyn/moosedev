@@ -17,6 +17,9 @@ pub const MAX_RETYPES: usize = 3;
 pub const FRUITLESS_SEARCH_LIMIT: usize = 2;
 
 pub(super) const CAPTURE_NOTE_QUESTION: &str = "The coding work is done and its required checks passed. Answer one plain question in prose, no JSON structure beyond the single note field: what should a future engineer know about this change that the diff alone does not say? Name the decision you made and why, any rule you discovered, and anything that surprised you. Say \"nothing beyond the diff\" if there is nothing durable. Do not restate the objective.";
+/// The question of a best-effort finish's capture: the checks did not pass,
+/// so the note says what was decided and built and what is unfinished.
+pub(super) const INCOMPLETE_NOTE_QUESTION: &str = "The coding work stopped before its required checks passed. Answer one plain question in prose, no JSON structure beyond the single note field: what should a future engineer know about what this task decided and built, and what is unfinished? Name each decision you made and why. Say \"nothing beyond the diff\" if there is nothing durable. Do not restate the objective.";
 
 /// The rendered project rules of one cycle (mode and approved revision) and
 /// each rule's entry by IRI, so a later step can say which entries changed.

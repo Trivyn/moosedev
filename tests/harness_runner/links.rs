@@ -244,6 +244,7 @@ async fn steering_during_link_review_keeps_the_guidance_after_the_review() {
 #[tokio::test]
 async fn last_error_kind_classifies_model_daemon_and_service_failures() {
     let _lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     // (a) Three invalid replacements exhaust the repair budget: model output.
     let fixture = symbolic_fixture().await;
     let mut runner = planned_symbolic_runner(&fixture).await;
