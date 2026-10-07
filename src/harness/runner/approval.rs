@@ -285,7 +285,7 @@ impl Runner {
             );
         }
         self.progressed();
-        self.event(format!("Human response: {text}"));
+        self.note_human_response(&text);
         if let Some(id) = id {
             self.task.delivered_messages.push(id.to_owned());
         }
@@ -480,6 +480,10 @@ impl Runner {
         }
         self.task.steps = 0;
         self.task.plan_stands_park = false;
+        // A question the model asked is abandoned, not answered: later
+        // guidance is not its answer.
+        self.task.handed_back = false;
+        self.task.answered_question = None;
         // Returning to Plan is human guidance: a fresh repair cycle, as for
         // an answer, or a spent budget would refuse the first plan.
         self.task.recovery = None;
@@ -503,7 +507,7 @@ impl Runner {
             "no question awaiting an answer"
         );
         self.progressed();
-        self.event(format!("Human response: {text}"));
+        self.note_human_response(&text);
         self.end_unchanged_window();
         self.forget_failure();
         self.task.knowledge_turn_sequence = self.task.knowledge_turn_sequence.saturating_add(1);
@@ -537,6 +541,52 @@ impl Runner {
 }
 
 impl Runner {
+    /// Journals the human's message. When it answers the model's own question,
+    /// it records the question, the answer and their events, so the next
+    /// prompt shows them together and whole: the model asked again and again
+    /// when the answer reached it only as the guidance line, away from its
+    /// question, and paged its own cut-off question instead of planning
+    /// (simH4 prompt 4).
+    pub(super) fn note_human_response(&mut self, text: &str) {
+        let asked = self
+            .task
+            .handed_back
+            .then(|| self.question_events())
+            .flatten();
+        self.event(format!("Human response: {text}"));
+        self.task.answered_question = asked.map(|(question, mut events)| {
+            events.push(self.task.events.len() - 1);
+            super::task::AnsweredQuestion {
+                question,
+                answer: text.to_owned(),
+                events,
+            }
+        });
+    }
+
+    /// The latest model action, when it was a question: its text, the action
+    /// event and the `Assistant:` echo after it.
+    fn question_events(&self) -> Option<(String, Vec<usize>)> {
+        let (at, action) = self
+            .task
+            .events
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, e)| e.message.strip_prefix("Model action: ").map(|a| (i, a)))?;
+        let action: serde_json::Value = serde_json::from_str(action).ok()?;
+        if action["action"] != "question" {
+            return None;
+        }
+        let question = action["question"].as_str()?.to_owned();
+        let echo = format!("Assistant: {question}");
+        let mut events = vec![at];
+        events.extend(
+            (at + 1..self.task.events.len()).filter(|i| self.task.events[*i].message == echo),
+        );
+        Some((question, events))
+    }
+
     /// Keep the approved plan beside `task.plan`, which the next replan
     /// replaces. Approving the same plan again (knowledge changed underneath
     /// it) refreshes its entry instead of adding one.

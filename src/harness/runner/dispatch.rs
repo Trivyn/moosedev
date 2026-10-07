@@ -540,6 +540,7 @@ impl Runner {
         }
         self.task.steps += 1;
         self.task.handed_back = false;
+        self.task.answered_question = None;
         self.task.plan_stands_park = false;
         self.event(format!("Model action: {}", serde_json::to_string(&step)?));
         self.persist()?;

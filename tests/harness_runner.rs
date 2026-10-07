@@ -5256,11 +5256,6 @@ async fn a_stuck_search_loop_recovers_twice_then_ends_incomplete() {
     let mut runner = fixture.interactive().await;
     for ask in 1..=7 {
         fixture.conversational(json!({"action":"search","query":"original"}));
-        // The model is asked what it is missing at each recovery; naming
-        // nothing leaves the recovery standing.
-        if ask == 3 || ask == 5 {
-            fixture.reply("harness_missing", json!({"missing":[]}));
-        }
         runner.advance().await.unwrap();
         assert_ne!(
             runner.task.phase,
@@ -5299,30 +5294,250 @@ async fn a_stuck_search_loop_recovers_twice_then_ends_incomplete() {
     );
 }
 
-/// What only the human holds is the human's stop: at a recovery, a model that
-/// names missing information parks with the list instead of continuing.
+/// A recovery is the harness's own continuation: it asks the model no
+/// missing question (that question belongs to a park), so nothing it could
+/// name turns the recovery back into a stop.
 #[tokio::test]
-async fn a_recovery_that_names_missing_information_parks_for_the_human() {
+async fn a_recovery_asks_no_missing_question() {
     let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for _ in 1..=3 {
+        fixture.conversational(json!({"action":"search","query":"original"}));
+        runner.advance().await.unwrap();
+    }
+    assert!(runner.task.events.iter().any(|event| event
+        .message
+        .starts_with("Harness recovery (search loop, 1 of 2)")));
+    assert_ne!(runner.task.phase, Phase::AwaitingInput);
+    let missing = requests_of_kind(&fixture, "model")
+        .iter()
+        .filter(|request| request["schema"] == "harness_missing")
+        .count();
+    assert_eq!(missing, 0);
+}
+
+/// The observations block of a prompt, for assertion messages.
+fn observations_of(prompt: &str) -> &str {
+    prompt
+        .find("Recent observations")
+        .map_or(prompt, |at| &prompt[at..])
+}
+
+/// Advances until the queued model reply is used, confirming the capture
+/// checkpoint an answer brings with no knowledge, as the bench driver does.
+async fn advance_to_the_next_action(fixture: &Fixture, runner: &mut Runner) {
+    for _ in 0..4 {
+        if fixture.shared.lock().unwrap().replies.is_empty() {
+            return;
+        }
+        if runner.task.phase == Phase::AwaitingReview {
+            runner.confirm_no_knowledge().await.unwrap();
+        } else {
+            runner.advance().await.unwrap();
+        }
+    }
+}
+
+/// A long, multi-part question, as qwen asks one (simH4 prompt 4: 1,895
+/// bytes, cut at 352 in the observations).
+fn a_long_question() -> String {
+    format!(
+        "Before I plan, I need to know how unit kinds are stored.\n\n1. Options: a) a kind column, b) a table of kinds.\n{}\n2. Which do you prefer? END-OF-QUESTION",
+        "Detail about the choice and its trade-offs. ".repeat(40)
+    )
+}
+
+/// The prompt after `answer`: the question and the answer, whole, in the
+/// Last result, and their events collapsed in the observations so the model
+/// neither re-asks nor pages its own question.
+async fn the_next_prompt_shows_the_answered_question(
+    fixture: &Fixture,
+    runner: &mut Runner,
+    question: &str,
+    answer: &str,
+) {
+    let asked = runner
+        .task
+        .events
+        .iter()
+        .rposition(|e| e.message.starts_with("Model action:") && e.message.contains("\"question\""))
+        .unwrap();
+    let answered = runner
+        .task
+        .events
+        .iter()
+        .rposition(|e| e.message == format!("Human response: {answer}"))
+        .unwrap();
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    advance_to_the_next_action(fixture, runner).await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        prompt.contains(&format!(
+            "The human answered your question.\nYour question (event {asked}): {question}\nThe human's answer (event {answered}): {answer}"
+        )),
+        "{}", observations_of(&prompt)
+    );
+    assert!(prompt.contains(&format!("Event {asked}: [shown as the Last result below]")));
+    assert!(prompt.contains(&format!(
+        "Event {answered}: [shown as the Last result below]"
+    )));
+    assert!(
+        !prompt.contains(&format!("inspect({asked}, ")),
+        "{}",
+        observations_of(&prompt)
+    );
+    assert!(!prompt.contains("Current human input is given above."));
+    // Once the model acts, the step after shows the usual observations.
+    fixture.conversational(json!({"action":"search","query":"original"}));
+    advance_to_the_next_action(fixture, runner).await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(!prompt.contains("The human answered your question."));
+}
+
+#[tokio::test]
+async fn an_answered_question_is_shown_with_its_answer_whole() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let question = a_long_question();
+    fixture.conversational(json!({"action":"question","question":question}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    let answer = "Use a kind column with foot and mounted.";
+    runner.answer(answer.into()).await.unwrap();
+    the_next_prompt_shows_the_answered_question(&fixture, &mut runner, &question, answer).await;
+}
+
+/// A message in Plan mode is new guidance (`return_to_plan_with_guidance`,
+/// the path the bench driver's answers take): it answers the question too.
+#[tokio::test]
+async fn a_plan_mode_message_answering_a_question_is_shown_with_it() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let question = a_long_question();
+    fixture.conversational(json!({"action":"question","question":question}));
+    runner.advance().await.unwrap();
+    let answer = "Pick a placeholder and say so in the plan.";
+    runner.submit_message(answer.into()).await.unwrap();
+    the_next_prompt_shows_the_answered_question(&fixture, &mut runner, &question, answer).await;
+}
+
+/// In Auto, an answer the harness judges unclear carries a plan reminder in
+/// the last result: the pair is shown, then the reminder.
+#[tokio::test]
+async fn an_unclear_answer_in_auto_is_shown_with_its_question_and_the_reminder() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    let question = a_long_question();
+    fixture.conversational(json!({"action":"question","question":question}));
+    runner.advance().await.unwrap();
+    assert_eq!(runner.task.phase, Phase::AwaitingInput);
+    let answer = "Use the kind column and keep the trade-offs short in the summary.";
+    runner.submit_message(answer.into()).await.unwrap();
+    assert_eq!(
+        intent_details(&runner, "message_disposition"),
+        vec!["unclear"]
+    );
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    advance_to_the_next_action(&fixture, &mut runner).await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        prompt.contains(&format!(
+            "The human's answer (event {}): {answer}\n\n(The approved plan stays in force.",
+            runner
+                .task
+                .events
+                .iter()
+                .rposition(|e| e.message == format!("Human response: {answer}"))
+                .unwrap()
+        )),
+        "{}",
+        observations_of(&prompt)
+    );
+}
+
+/// `/plan` abandons the model's question: the guidance after it is not its
+/// answer.
+#[tokio::test]
+async fn guidance_after_plan_does_not_answer_an_abandoned_question() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"question","question":a_long_question()}));
+    runner.advance().await.unwrap();
+    runner.mode_plan().await.unwrap();
+    runner
+        .submit_message("Plan the repair of code.txt.".into())
+        .await
+        .unwrap();
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    advance_to_the_next_action(&fixture, &mut runner).await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        !prompt.contains("The human answered your question."),
+        "{}",
+        observations_of(&prompt)
+    );
+}
+
+/// A pair too large for the room every prompt keeps for observations is not
+/// claimed as shown whole: its events stay pageable.
+#[tokio::test]
+async fn an_answered_question_too_large_to_show_whole_is_not_claimed() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    let question = format!("{}{}", a_long_question(), "More detail. ".repeat(400));
+    fixture.conversational(json!({"action":"question","question":question}));
+    runner.advance().await.unwrap();
+    runner.answer("Pick one.".into()).await.unwrap();
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    advance_to_the_next_action(&fixture, &mut runner).await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        !prompt.contains("The human answered your question."),
+        "{}",
+        observations_of(&prompt)
+    );
+    assert!(
+        !prompt.contains("[shown as the Last result below]"),
+        "{}",
+        observations_of(&prompt)
+    );
+}
+
+/// An answer to a harness park, not to a question, renders as before: the
+/// guidance line holds it.
+#[tokio::test]
+async fn an_answer_to_a_park_is_not_shown_as_an_answered_question() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _recover_off = RecoverOff::set();
     let fixture = Fixture::new().await;
     let mut runner = fixture.interactive().await;
     for ask in 1..=3 {
         fixture.conversational(json!({"action":"search","query":"original"}));
         if ask == 3 {
-            fixture.reply(
-                "harness_missing",
-                json!({"missing":["the yield table's food values"]}),
-            );
+            fixture.reply("harness_missing", json!({"missing":[]}));
         }
         runner.advance().await.unwrap();
     }
     assert_eq!(runner.task.phase, Phase::AwaitingInput);
-    assert!(runner
-        .task
-        .last_response
-        .starts_with("The model needs information the project does not hold:\n- the yield table's food values\nGuidance is needed"));
-    assert!(runner.task.events.iter().any(|event| event.message
-        == "Harness recovery set aside: the model named information only the human holds."));
+    runner
+        .answer("Continue with the plan.".into())
+        .await
+        .unwrap();
+    fixture.conversational(json!({"action":"read","file":"code.txt"}));
+    advance_to_the_next_action(&fixture, &mut runner).await;
+    let prompt = fixture.last_model_prompt("harness_action");
+    assert!(
+        prompt.contains("Current human input is given above."),
+        "{}",
+        observations_of(&prompt)
+    );
+    assert!(!prompt.contains("The human answered your question."));
 }
 
 /// The model's own question is the human's stop: recovery leaves it waiting.

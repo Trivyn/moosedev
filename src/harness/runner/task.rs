@@ -112,6 +112,17 @@ impl Plan {
     }
 }
 
+/// The model's question and the human's answer to it, shown together and
+/// whole in the next prompt's Last result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnsweredQuestion {
+    pub question: String,
+    pub answer: String,
+    /// The journal events the Last result holds: the question action, its
+    /// `Assistant:` echo and the `Human response:`.
+    pub events: Vec<usize>,
+}
+
 /// A governing rule a proposed plan leaves open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -559,6 +570,10 @@ pub struct Task {
     /// Harness recoveries since the last progress ([`Runner::recover`]).
     #[serde(default)]
     pub(super) stuck_recoveries: usize,
+    /// The model's question the human just answered, until the model's next
+    /// action ([`Runner::note_human_response`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) answered_question: Option<AnsweredQuestion>,
     /// Cancellation is durable even when scratch cleanup must be retried.
     #[serde(default)]
     pub cleanup_pending: bool,

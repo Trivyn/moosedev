@@ -412,6 +412,7 @@ impl Runner {
             best_effort: None,
             incomplete_capture: false,
             stuck_recoveries: 0,
+            answered_question: None,
             cleanup_pending: false,
             source: BTreeMap::new(),
             source_recency: Vec::new(),

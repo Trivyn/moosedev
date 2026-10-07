@@ -517,6 +517,17 @@ fn delivered_evidence(searches: &[KnowledgeSearchResult]) -> String {
     )
 }
 
+/// The model's question and the human's answer as the Last result shows them.
+fn answered_pair(answered: &super::task::AnsweredQuestion) -> String {
+    let [.., answer_at] = answered.events[..] else {
+        unreachable!("an answered question records its answer event")
+    };
+    format!(
+        "The human answered your question.\nYour question (event {}): {}\nThe human's answer (event {answer_at}): {}",
+        answered.events[0], answered.question, answered.answer
+    )
+}
+
 pub(super) fn observation_preview(text: &str, budget: usize) -> String {
     const NOTICE: &str =
         "\n[observation shortened; complete evidence is retained in the task journal]\n";
@@ -1894,15 +1905,37 @@ impl Runner {
             .source)
     }
 
-    /// The last result as the observations block shows it.
-    fn last_result(&self) -> &str {
+    /// The last result as the observations block shows it. An answer to the
+    /// model's own question is shown with the question, both whole.
+    fn last_result(&self) -> std::borrow::Cow<'_, str> {
+        if let Some(answered) = self.answered_question() {
+            // What the harness added after the answer (a plan reminder) follows.
+            let added = &self.task.last_response[answered.answer.len()..];
+            return format!("{}{added}", answered_pair(answered)).into();
+        }
         if self.task.last_response == self.task.guidance
             || self.task.last_response == self.task.objective
         {
-            "Current human input is given above."
+            "Current human input is given above.".into()
         } else {
-            &self.task.last_response
+            self.task.last_response.as_str().into()
         }
+    }
+
+    /// The answered question the Last result shows: only while the answer
+    /// still heads the last result, and only when the pair fits the room
+    /// every prompt keeps for observations, so it is never clipped while its
+    /// events say it is shown whole.
+    fn answered_question(&self) -> Option<&super::task::AnsweredQuestion> {
+        self.task.answered_question.as_ref().filter(|answered| {
+            let added = self
+                .task
+                .last_response
+                .strip_prefix(answered.answer.as_str());
+            added.is_some_and(|added| {
+                answered_pair(answered).len() + added.len() <= OBSERVATION_FLOOR / 2
+            })
+        })
     }
 
     /// Bytes source must leave for this step's observations block: what it
@@ -1920,6 +1953,10 @@ impl Runner {
     /// result is collapsed to a marker: a preview invites paging what is
     /// already in view.
     fn recent_observations(&self) -> Result<String> {
+        // An answered question's events are held whole by the Last result.
+        let in_last_result: &[usize] = self
+            .answered_question()
+            .map_or(&[], |answered| &answered.events);
         let shown = self
             .task
             .events
@@ -1931,7 +1968,10 @@ impl Runner {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, e)| e.message != format!("Human response: {}", self.task.guidance))
+            .filter(|(i, e)| {
+                in_last_result.contains(i)
+                    || e.message != format!("Human response: {}", self.task.guidance)
+            })
             .take(6)
             .map(|(i, e)| (i, e.message.as_str()))
             .collect();
@@ -1945,7 +1985,7 @@ impl Runner {
             let list: Vec<String> = recent
                 .iter()
                 .map(|(i, message)| {
-                    if Some(*i) == shown {
+                    if Some(*i) == shown || in_last_result.contains(i) {
                         format!("Event {i}: [shown as the Last result below]")
                     } else if once
                         && command_output(message).is_some_and(|output| shown_whole(last, output))
@@ -2096,7 +2136,7 @@ impl Runner {
         let observations = format!(
             "{header}{}\n",
             observation_preview(
-                last,
+                &last,
                 block.saturating_sub(header.len()).max(LAST_RESULT_FLOOR)
             )
         );

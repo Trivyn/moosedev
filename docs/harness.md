@@ -1107,7 +1107,15 @@ repeating a command. An inspect page is as large as the next prompt can show
 unclipped, so an event that fits arrives whole in one step; the
 recent-observations list marks the latest event shown as the Last result
 instead of previewing it again, and its six previews shrink together to stay
-within 3 KB, so a crowded prompt still leaves a page several KB. A page the
+within 3 KB, so a crowded prompt still leaves a page several KB. When the human
+answers the model's own question, the next prompt's Last result holds the
+question and the answer together and whole ("The human answered your
+question. Your question (event N): … The human's answer (event M): …"), and
+the question action, its `Assistant:` echo and the `Human response:` are
+listed as shown there (`Task.answered_question`, cleared at the model's next
+action). Before, the answer reached the model only as the guidance line, away
+from its question, whose preview was cut at 352 bytes: in simH4 prompt 4 qwen
+asked the same question six times and paged its own words in between. A page the
 model asks for again in the current run of inspects (back to its last other
 action or a human message) is served again once it has left the prompt
 (`inspect_served_again`): the model no longer has it. It is refused while it
@@ -1175,9 +1183,8 @@ required checks passed", asked by its own question) and, once the review is
 resolved, ends the task in the terminal phase `Incomplete` (`task_incomplete`).
 Without an approved plan the task ends `Incomplete` at once, with nothing
 captured. The step cap and a prompt that cannot fit go straight to the
-best-effort finish. When the model, asked what it is missing at a looking
-stop, names information the project does not hold, that is the human's stop:
-the task parks with the list. `MOOSEDEV_HARNESS_RECOVER=off` parks every
+best-effort finish. A recovery asks the model no missing question; that
+question belongs to a park. `MOOSEDEV_HARNESS_RECOVER=off` parks every
 model-stuck stop for the human, as before.
 Consecutive searches matching
 nothing are counted: the second states that the channel is exhausted and names
