@@ -556,7 +556,17 @@ impl Runner {
         );
         match step {
             Step::Inspect { event, offset } => {
+                if self.count_empty_look(event, offset, &shown) {
+                    return self.persist();
+                }
                 if self.refuse_repeated_inspect(event, offset, &shown) {
+                    return self.persist();
+                }
+                if let Some(file) = self.source_copy(event) {
+                    self.intent_event("inspect_of_source_copy", &format!("{event}: {file}"));
+                    self.task.last_response = format!(
+                        "Event {event} holds an earlier copy of `{file}`; its current text is under Source. Act on it there."
+                    );
                     return self.persist();
                 }
                 // A page is as large as the next prompt can show unclipped, so
@@ -1417,6 +1427,12 @@ fn search_park_enabled() -> bool {
 }
 pub(super) const READ_REFUSED: &str = "Not read again:";
 
+/// `MOOSEDEV_HARNESS_EMPTY_LOOKS=off` leaves inspects that can return
+/// nothing new to the inspect guard's run alone.
+fn empty_looks_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_EMPTY_LOOKS").map_or(true, |value| value.trim() != "off")
+}
+
 /// Whether an inspect of a page that has left the prompt is served again
 /// (once) instead of refused. `MOOSEDEV_HARNESS_INSPECT_RESERVE=off`
 /// restores the refusal of any repeat in the run.
@@ -1688,9 +1704,12 @@ impl Runner {
     /// with how many times, in the order first searched. Each query's stored
     /// answers are matched by their whole opening, never parsed out of the
     /// text, so a query holding the answer's own words cannot be misread.
-    fn repeated_searches(&self) -> Vec<(String, usize)> {
-        let start = self
-            .task
+    /// Where the current stretch without progress begins: after the last
+    /// human message or harness recovery, applied edit or proposed plan.
+    /// Other actions do not end it, so a loop broken up by them is still one
+    /// loop (the search and empty-look guards).
+    fn progress_window_start(&self) -> usize {
+        self.task
             .events
             .iter()
             .rposition(|event| {
@@ -1699,7 +1718,11 @@ impl Runner {
                     || message.starts_with("Applied edit")
                     || message.starts_with("Proposed plan: ")
             })
-            .map_or(0, |progress| progress + 1);
+            .map_or(0, |progress| progress + 1)
+    }
+
+    fn repeated_searches(&self) -> Vec<(String, usize)> {
+        let start = self.progress_window_start();
         let stretch = &self.task.events[start..];
         let mut repeats: Vec<(String, usize)> = Vec::new();
         for search in &self.task.knowledge_searches {
@@ -1769,6 +1792,103 @@ impl Runner {
     }
 
     /// Whether the Last result, which the prompt shows, is this page.
+    /// The file a journal event is a current copy of: a read whose text is
+    /// still the file's current text, which the prompt shows in full under
+    /// Source (simH5: 44 inspects of such copies; Lesson 4574e273). An edit,
+    /// or an older version, is history only the journal holds.
+    fn source_copy(&self, event: usize) -> Option<String> {
+        if !model::pointer_observations_enabled() {
+            return None;
+        }
+        let message = &self.task.events.get(event)?.message;
+        let model::FileCopy::Text(file) = model::copied_file(message, &self.task.source_full)?
+        else {
+            return None;
+        };
+        let current = self.task.source.get(file).and_then(Option::as_deref);
+        (model::copied_text(message, file) == current).then(|| file.to_owned())
+    }
+
+    /// Why an inspect of (`event`, `offset`), asked at or after journal
+    /// index `before`, can return nothing the model lacks: a current copy of
+    /// a file under Source, the page the prompt showed as the Last result, or
+    /// a page already asked for since the last progress.
+    pub(super) fn empty_look(
+        &self,
+        event: usize,
+        offset: usize,
+        shown: &str,
+        before: usize,
+    ) -> Option<String> {
+        if let Some(file) = self.source_copy(event) {
+            return Some(format!(
+                "event {event} is the current text of `{file}` under Source"
+            ));
+        }
+        if Self::inspect_page_showing(event, offset, shown) {
+            return Some(format!("event {event} at {offset} was the Last result"));
+        }
+        let action = serde_json::to_string(&Step::Inspect { event, offset }).ok()?;
+        let action = format!("Model action: {action}");
+        let start = self.progress_window_start();
+        self.task.events[start.min(before)..before]
+            .iter()
+            .rposition(|e| e.message == action)
+            .map(|at| {
+                format!(
+                    "event {event} at {offset} was asked for at event {}",
+                    start + at
+                )
+            })
+    }
+
+    /// Whether an empty look asked at or after `before` would be the second
+    /// since the last progress: the model is stuck looking at what it has.
+    pub(super) fn empty_look_repeated(&self, before: usize) -> bool {
+        let start = self.progress_window_start();
+        empty_looks_enabled()
+            && self
+                .task
+                .empty_looks
+                .iter()
+                .any(|at| (start..before).contains(at))
+    }
+
+    /// Counts an empty look. The second since the last progress is the model
+    /// stuck: the harness recovers (`stop_stuck`) instead of answering it.
+    /// The inspect guard's run ends at any other action, so a loop broken up
+    /// by reads and searches went unseen (simH5: 98 exact repeats); this
+    /// window ends only at progress, as the search guard's does. Returns
+    /// whether the step ended.
+    fn count_empty_look(&mut self, event: usize, offset: usize, shown: &str) -> bool {
+        if !empty_looks_enabled() {
+            return false;
+        }
+        let at = self.task.events.len() - 1;
+        let Some(why) = self.empty_look(event, offset, shown, at) else {
+            return false;
+        };
+        if self.empty_look_repeated(at) {
+            self.intent_event("empty_look_repeated", &why);
+            // While a required check fails, the first look that would stop
+            // gets the failure's source instead, as the other look guards do.
+            if let Some(steer) = self.steer_before_park() {
+                self.task.last_response = steer;
+                return true;
+            }
+            self.looking_parked = true;
+            self.stop_stuck(
+                "inspect loop",
+                format!("Inspect loop: the model keeps inspecting what the prompt already shows ({why}); parked for guidance."),
+                format!("The model keeps inspecting what the prompt already shows ({why}), without planning or editing. Guidance is needed: say what to change, or /plan to change the approach."),
+            );
+            return true;
+        }
+        self.intent_event("empty_look", &why);
+        self.task.empty_looks.push(at);
+        false
+    }
+
     fn inspect_page_showing(event: usize, offset: usize, shown: &str) -> bool {
         shown.starts_with(&format!("Journal event {event}, bytes {offset}.."))
     }

@@ -471,6 +471,9 @@ struct Mandatory {
     fixed: usize,
     /// What the rules section in `head` delivered.
     rules: RulesReceipt,
+    /// Whether the plan line shows the whole plan (a plan event can point
+    /// at it).
+    plan_whole: bool,
 }
 
 /// One physical generation: action JSON text (json_schema contract, capture note)
@@ -586,6 +589,139 @@ fn pointer_line(index: usize, message: &str) -> String {
         "Event {index}: {}{} - its whole output is the Last result below.",
         super::bounded(head, 200),
         if failed { " (failed)" } else { "" }
+    )
+}
+
+/// `MOOSEDEV_HARNESS_POINTER_OBSERVATIONS=off` lists a recent event that does
+/// not fit as a cut preview (head, tail and the page between), as before.
+pub(super) fn pointer_observations_enabled() -> bool {
+    std::env::var("MOOSEDEV_HARNESS_POINTER_OBSERVATIONS")
+        .map_or(true, |value| value.trim() != "off")
+}
+
+/// What the prompt being built shows whole besides the observations: the
+/// files in Source's full tier and whether the plan line is the whole plan.
+pub(super) struct ObservationView<'a> {
+    pub(super) full: &'a BTreeSet<String>,
+    /// The working set's current text, to tell a current read from an old
+    /// one.
+    pub(super) source: &'a BTreeMap<String, Option<String>>,
+    /// The stored plan's summary, when the plan line shows it whole.
+    pub(super) plan_whole: Option<&'a str>,
+}
+
+/// What a recent event copies of a file.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum FileCopy<'a> {
+    /// A read or served read: the file's text when it was read.
+    Text(&'a str),
+    /// An applied edit or the model's edit action: its before-text is
+    /// history only the journal holds.
+    Edit(&'a str),
+}
+
+/// The file among `files` a recent event copies, matched against the known
+/// files rather than parsed out of the text, so a path with spaces or colons
+/// is found whole.
+pub(super) fn copied_file<'a>(message: &str, files: &'a BTreeSet<String>) -> Option<FileCopy<'a>> {
+    if let Some(action) = message.strip_prefix("Model action: ") {
+        let action: serde_json::Value = serde_json::from_str(action).ok()?;
+        if !matches!(
+            action["action"].as_str(),
+            Some("edit" | "replace" | "write")
+        ) {
+            return None;
+        }
+        return files
+            .get(action["file"].as_str()?)
+            .map(|file| FileCopy::Edit(file));
+    }
+    files.iter().find_map(|file| {
+        let served = [
+            super::actions::OUTLINED_SERVED,
+            super::actions::SHOWN_SERVED,
+            super::actions::OUTSIDE_SCOPE_SERVED,
+        ]
+        .iter()
+        .any(|prefix| message.starts_with(&format!("{prefix} {file} (")));
+        if served || message.starts_with(&format!("Read {file}: ")) {
+            Some(FileCopy::Text(file))
+        } else {
+            message
+                .starts_with(&format!("Applied edit {file}\n"))
+                .then_some(FileCopy::Edit(file))
+        }
+    })
+}
+
+/// The text a read or served read of `file` copied.
+pub(super) fn copied_text<'a>(message: &'a str, file: &str) -> Option<&'a str> {
+    if let Some(text) = message.strip_prefix(&format!("Read {file}: ")) {
+        return Some(text);
+    }
+    message.split_once('\n').map(|(_, text)| text)
+}
+
+/// The summary of a plan event: the model's plan action or a proposal.
+fn plan_summary(message: &str) -> Option<String> {
+    let json = message
+        .strip_prefix("Proposed plan: ")
+        .or_else(|| message.strip_prefix("Model action: "))?;
+    let plan: serde_json::Value = serde_json::from_str(json).ok()?;
+    if message.starts_with("Model action: ") && plan["action"] != "plan" {
+        return None;
+    }
+    plan["summary"].as_str().map(str::to_owned)
+}
+
+/// A recent event as the observations list shows it when it does not fit
+/// whole: one line saying where its whole text is, never half of it (Lesson
+/// c3ee818a). A copy of a file Source shows in full points there, the plan
+/// at the plan line, anything else at the one inspect that returns it whole.
+/// Without a view (the reserve, before the prompt's source is chosen) every
+/// event takes the journal line, which is never shorter than the others.
+/// The head line takes at most a fifth of `limit`, the list's per-entry
+/// share, so the list's shrink loop shrinks pointers too.
+fn observation_line(
+    index: usize,
+    message: &str,
+    limit: usize,
+    view: Option<&ObservationView>,
+) -> String {
+    let head = super::bounded(
+        message.lines().next().unwrap_or_default(),
+        (limit / 5).min(160),
+    );
+    if let Some(view) = view {
+        match copied_file(message, view.full) {
+            // A read of an older version is history: the journal line.
+            Some(FileCopy::Text(file))
+                if copied_text(message, file)
+                    == view.source.get(file).and_then(Option::as_deref) =>
+            {
+                return format!("Event {index}: {head} - current text under Source.");
+            }
+            Some(FileCopy::Text(_)) => {}
+            // The edit itself (its before-text) stays in the journal, and
+            // inspect still pages it; the line does not ask for that.
+            Some(FileCopy::Edit(_)) => {
+                return format!(
+                    "Event {index}: {head} ({} bytes) - the file's current text is under Source.",
+                    message.len()
+                );
+            }
+            None => {}
+        }
+        if view
+            .plan_whole
+            .is_some_and(|plan| plan_summary(message).as_deref() == Some(plan))
+        {
+            return format!("Event {index}: your plan - shown above as the plan.");
+        }
+    }
+    format!(
+        "Event {index}: {head} ({} bytes, journal event {index})",
+        message.len()
     )
 }
 
@@ -1398,12 +1534,12 @@ impl Runner {
                         .and_then(Value::as_u64)
                         .and_then(|offset| usize::try_from(offset).ok())
                         .unwrap_or(0);
-                    self.inspect_refusal_due(
-                        event,
-                        offset,
-                        self.task.events.len(),
-                        &self.task.last_response,
-                    )
+                    let before = self.task.events.len();
+                    let shown = &self.task.last_response;
+                    self.inspect_refusal_due(event, offset, before, shown)
+                        // A second empty look ends in a recovery, not a page.
+                        || (self.empty_look_repeated(before)
+                            && self.empty_look(event, offset, shown, before).is_some())
                 }),
             // As dispatch will run it: a leading `cd` to a missing directory
             // is dropped first (`without_missing_cd`).
@@ -1804,6 +1940,9 @@ impl Runner {
             }
             _ => focused_plan,
         };
+        let plan_whole = !plan.trim().is_empty()
+            && !plan.contains("[Plan shown in part")
+            && !plan.contains("[Plan cut");
         prompt.push_str(&plan);
         let fixed = prompt.len() + rest;
         let known = rules.len() + context.context.len() + dossiers.len() + schema_bytes;
@@ -1857,6 +1996,7 @@ impl Runner {
             source,
             fixed,
             rules: rules_receipt,
+            plan_whole,
         })
     }
 
@@ -1944,7 +2084,10 @@ impl Runner {
     /// floor from source (badciv 7e0c50eb: 2.3 KB shown, 8 KB held back,
     /// while five files rotated through a budget one file short).
     pub(super) fn observation_reserve(&self) -> Result<usize> {
-        let needed = self.observations_prefix()?.len() + self.last_result().len() + 1;
+        // The list is counted at its cap: the prompt's own list, rendered once
+        // its source is chosen, may shrink differently from this one.
+        let header = self.observations_prefix()?.len() - self.recent_observations()?.len();
+        let needed = header + RECENT_OBSERVATIONS_BYTES + self.last_result().len() + 1;
         Ok(needed.min(OBSERVATION_FLOOR))
     }
 
@@ -1953,6 +2096,12 @@ impl Runner {
     /// result is collapsed to a marker: a preview invites paging what is
     /// already in view.
     fn recent_observations(&self) -> Result<String> {
+        self.recent_observations_in(None)
+    }
+
+    /// The recent observations of the prompt `view` describes; without one,
+    /// as the reserve measures them.
+    fn recent_observations_in(&self, view: Option<&ObservationView>) -> Result<String> {
         // An answered question's events are held whole by the Last result.
         let in_last_result: &[usize] = self
             .answered_question()
@@ -1979,6 +2128,7 @@ impl Runner {
         // Each event once (Lesson c3ee818a): one the Last result holds whole
         // is a pointer, and a cut one names the page that holds the rest.
         let once = observations_once_enabled();
+        let pointers = pointer_observations_enabled();
         let last = self.task.last_response.as_str();
         let mut limit = RECENT_PREVIEW_BYTES;
         loop {
@@ -1991,6 +2141,8 @@ impl Runner {
                         && command_output(message).is_some_and(|output| shown_whole(last, output))
                     {
                         pointer_line(*i, message)
+                    } else if once && pointers && message.len() > limit {
+                        observation_line(*i, message, limit, view)
                     } else if once {
                         format!("Event {i}: {}", paged_preview(message, limit, *i, 0))
                     } else {
@@ -2007,7 +2159,14 @@ impl Runner {
     }
 
     fn observations_prefix(&self) -> Result<String> {
+        self.observations_prefix_in(None)
+    }
+
+    /// The observations header of the prompt `view` describes; without one,
+    /// as the reserve measures it.
+    fn observations_prefix_in(&self, view: Option<&ObservationView>) -> Result<String> {
         let once = observations_once_enabled();
+        let pointers = pointer_observations_enabled();
         let last = self.task.last_response.as_str();
         let outputs: Vec<_> = self
             .task
@@ -2034,6 +2193,12 @@ impl Runner {
                         && command_output(&event.message) == Some(c.output.as_str())
                 });
                 match event {
+                    Some(event) if pointers && c.output.len() > 800 => format!(
+                        "Check {index}: `{}` {} ({} bytes, journal event {event})",
+                        super::bounded(&c.command, 200),
+                        if c.success { "passed" } else { "failed" },
+                        self.task.events[event].message.len()
+                    ),
                     Some(event) => {
                         let base = self.task.events[event].message.len() - c.output.len();
                         format!(
@@ -2053,7 +2218,7 @@ impl Runner {
         Ok(format!(
             "{}{header}\n{}\nCheck output previews:\n{}\nLast result:\n",
             delivered_evidence(&self.task.knowledge_searches),
-            self.recent_observations()?,
+            self.recent_observations_in(view)?,
             outputs.join("\n")
         ))
     }
@@ -2109,10 +2274,22 @@ impl Runner {
             mut remaining,
             source,
             rules,
+            plan_whole,
             ..
         } = self.mandatory_prompt(context, self.observation_reserve()?)?;
         let last = self.last_result();
-        let header = self.observations_prefix()?;
+        // The source and plan are chosen: events they hold whole point there.
+        let full = source.full();
+        let header = self.observations_prefix_in(Some(&ObservationView {
+            full: &full,
+            source: &self.task.source,
+            plan_whole: self
+                .task
+                .plan
+                .as_ref()
+                .filter(|_| plan_whole)
+                .map(|plan| plan.summary.as_str()),
+        }))?;
         // The last result is usually the evidence the model just asked for. A
         // fixed 3 KB of a 25 KB search result costs a dozen inspect round trips
         // to page back, 2 KB at a time, and each page overwrites the last -- so
@@ -2937,6 +3114,144 @@ mod tests {
             assert!(observation_budget(remaining) <= remaining.max(OBSERVATION_FLOOR));
             assert!(observation_budget(remaining) <= OBSERVATION_CEILING);
         }
+    }
+
+    #[test]
+    fn a_copied_file_is_matched_against_the_known_files() {
+        let files: BTreeSet<String> = [
+            "src/lib.rs".to_owned(),
+            "src/my file.rs".to_owned(),
+            "src/a:b.rs".to_owned(),
+        ]
+        .into();
+        assert_eq!(
+            copied_file("Read src/lib.rs: fn main() {}", &files),
+            Some(FileCopy::Text("src/lib.rs"))
+        );
+        assert_eq!(
+            copied_file("Read src/a:b.rs: x", &files),
+            Some(FileCopy::Text("src/a:b.rs"))
+        );
+        assert_eq!(
+            copied_file("Applied edit src/lib.rs\nBefore:\na\nAfter:\nb", &files),
+            Some(FileCopy::Edit("src/lib.rs"))
+        );
+        for served in [
+            "Served outlined read: src/my file.rs (20 bytes):\ntext",
+            "Served read of a file shown in full: src/my file.rs (20 bytes):\ntext",
+            "Served read outside scope: src/my file.rs (20 bytes):\ntext",
+        ] {
+            assert_eq!(
+                copied_file(served, &files),
+                Some(FileCopy::Text("src/my file.rs")),
+                "{served}"
+            );
+            assert_eq!(copied_text(served, "src/my file.rs"), Some("text"));
+        }
+        assert_eq!(copied_text("Read src/a:b.rs: x", "src/a:b.rs"), Some("x"));
+        assert_eq!(
+            copied_file(
+                r#"Model action: {"action":"edit","file":"src/lib.rs","before":"a","after":"b"}"#,
+                &files
+            ),
+            Some(FileCopy::Edit("src/lib.rs"))
+        );
+        // Not a known file, not a copy.
+        assert_eq!(copied_file("Read src/my: x", &files), None);
+        assert_eq!(
+            copied_file(
+                r#"Model action: {"action":"read","file":"src/lib.rs"}"#,
+                &files
+            ),
+            None
+        );
+        assert_eq!(
+            copied_file("Command: cat src/lib.rs\nPermission grants: none", &files),
+            None
+        );
+    }
+
+    /// A recent event that does not fit is one line saying where its whole
+    /// text is, never half of it.
+    #[test]
+    fn an_event_that_does_not_fit_points_to_its_whole_text() {
+        let read = format!("Read src/a.rs: {}", "x".repeat(2_000));
+        let edit = format!("Applied edit src/a.rs\nBefore:\n{}", "b".repeat(2_000));
+        let summary = "p".repeat(2_000);
+        let plan = format!(r#"Model action: {{"action":"plan","summary":"{summary}"}}"#);
+        let command = format!(
+            "Command: cargo test\nPermission grants: none\nSuccess: false\n{}",
+            "e".repeat(2_000)
+        );
+        let full: BTreeSet<String> = ["src/a.rs".to_owned()].into();
+        let none = BTreeSet::new();
+        let current: BTreeMap<String, Option<String>> =
+            [("src/a.rs".to_owned(), Some("x".repeat(2_000)))].into();
+        let edited: BTreeMap<String, Option<String>> =
+            [("src/a.rs".to_owned(), Some("y".repeat(2_000)))].into();
+        let shown = ObservationView {
+            full: &full,
+            source: &current,
+            plan_whole: Some(&summary),
+        };
+        let other_plan = ObservationView {
+            full: &full,
+            source: &current,
+            plan_whole: Some("another plan"),
+        };
+        let cut = ObservationView {
+            full: &none,
+            source: &current,
+            plan_whole: None,
+        };
+        // A read of an older version is history: the journal line, not
+        // "current text under Source".
+        let stale = ObservationView {
+            full: &full,
+            source: &edited,
+            plan_whole: None,
+        };
+        assert!(observation_line(7, &read, 800, Some(&stale))
+            .ends_with(&format!("({} bytes, journal event 7)", read.len())));
+        assert_eq!(
+            observation_line(7, &read, 800, Some(&shown)),
+            format!(
+                "Event 7: {} - current text under Source.",
+                super::super::bounded(&read, 160)
+            )
+        );
+        let edit_line = observation_line(6, &edit, 800, Some(&shown));
+        assert!(
+            edit_line.ends_with(&format!(
+                "({} bytes) - the file's current text is under Source.",
+                edit.len()
+            )),
+            "{edit_line}"
+        );
+        assert!(!edit_line.contains("inspect("));
+        assert_eq!(
+            observation_line(8, &plan, 800, Some(&shown)),
+            "Event 8: your plan - shown above as the plan."
+        );
+        // Not in the full tier, another stored plan, a cut plan, or no view:
+        // its size and the journal event that holds it, with no invitation
+        // to page it (the Step 0 replay: the model takes an offered inspect).
+        for (index, message, view) in [
+            (7, &read, Some(&cut)),
+            (8, &plan, Some(&other_plan)),
+            (8, &plan, Some(&cut)),
+            (9, &command, None),
+        ] {
+            let line = observation_line(index, message, 800, view);
+            assert!(
+                line.ends_with(&format!("({} bytes, journal event {index})", message.len())),
+                "{line}"
+            );
+            assert!(!line.contains("not shown here") && !line.contains("inspect("));
+            assert!(line.len() < 300);
+        }
+        // The head shrinks with the list's per-entry share.
+        assert!(observation_line(9, &command, 50, None).len() < 100);
     }
 
     #[test]

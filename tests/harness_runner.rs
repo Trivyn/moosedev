@@ -3236,6 +3236,8 @@ async fn a_plan_over_the_output_bound_is_refused_with_its_size() {
 async fn alternating_inspects_of_the_same_pages_are_refused_then_parked() {
     let _env_lock = ENVIRONMENT.lock().await;
     let _recover_off = RecoverOff::set();
+    // The run-based ladder alone: the empty-look count stops this loop sooner.
+    let _empty_looks_off = EmptyLooksOff::set();
     // badciv f2fe1f61: qwen alternated inspect(137, 0) and inspect(137, 1776)
     // 132 times; journal events never change, so a repeat is a loop.
     let fixture = Fixture::new().await;
@@ -3401,7 +3403,7 @@ async fn an_outlined_file_read_again_is_served_without_rotating_the_tiers() {
     runner.advance().await.unwrap();
     assert_eq!(
         runner.task.last_response,
-        format!("Not read again: `a.rs` is unchanged and its current text is the Last result (served at event {event}). Propose the plan from it, or inspect event {event}.")
+        format!("Not read again: `a.rs` is unchanged and its current text is the Last result (served at event {event}). Propose the plan from it.")
     );
     assert_eq!(runner.task.phase, Phase::Planning);
     assert_eq!(intent_details(&runner, "outlined_read_served").len(), 1);
@@ -3570,7 +3572,12 @@ async fn an_edit_attempt_between_refused_reads_does_not_park() {
         .task
         .last_response
         .starts_with("Not read again: `a.rs`"));
-    assert!(runner.task.last_response.contains("Edit it, or inspect"));
+    // Its current text is the Last result: nothing to page.
+    assert!(
+        runner.task.last_response.contains("Edit it."),
+        "{}",
+        runner.task.last_response
+    );
     // Served only in part, so the edit guard still holds: this attempt
     // becomes a read of a.rs, which is progress, so the next refusal is a
     // first refusal again.
@@ -5538,6 +5545,346 @@ async fn an_answer_to_a_park_is_not_shown_as_an_answered_question() {
         observations_of(&prompt)
     );
     assert!(!prompt.contains("The human answered your question."));
+}
+
+/// A read of a file Source shows in full is listed as a pointer there, and an
+/// inspect of it is answered without a page: the model paged such copies 44
+/// times in simH5. `MOOSEDEV_HARNESS_POINTER_OBSERVATIONS=off` restores the
+/// cut preview.
+#[tokio::test]
+async fn a_copy_of_a_file_in_source_points_there_and_is_not_paged() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    for pointers in [true, false] {
+        if !pointers {
+            std::env::set_var("MOOSEDEV_HARNESS_POINTER_OBSERVATIONS", "off");
+        }
+        let fixture = Fixture::new().await;
+        std::fs::write(
+            fixture.root.join("big.rs"),
+            (0..60)
+                .map(|n| format!("pub fn f{n}() -> u32 {{ {n} }}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let mut runner = fixture.interactive().await;
+        fixture.conversational(json!({"action":"read","file":"big.rs"}));
+        runner.advance().await.unwrap();
+        let read = runner
+            .task
+            .events
+            .iter()
+            .rposition(|e| e.message.starts_with("Read big.rs:"))
+            .unwrap();
+        fixture.conversational(json!({"action":"search","query":"f1"}));
+        runner.advance().await.unwrap();
+        let prompt = fixture.last_model_prompt("harness_action");
+        let observations = observations_of(&prompt);
+        if !pointers {
+            std::env::remove_var("MOOSEDEV_HARNESS_POINTER_OBSERVATIONS");
+            assert!(
+                observations.contains(&format!("not shown here; inspect({read}, ")),
+                "{observations}"
+            );
+            continue;
+        }
+        assert!(
+            observations.contains(&format!("Event {read}: Read big.rs: pub fn f0() -> u32 {{ 0 }} - current text under Source.")),
+            "{observations}"
+        );
+        assert!(!observations.contains("not shown here"), "{observations}");
+        fixture.conversational(json!({"action":"inspect","event":read,"offset":352}));
+        runner.advance().await.unwrap();
+        assert_eq!(
+            runner.task.last_response,
+            format!("Event {read} holds an earlier copy of `big.rs`; its current text is under Source. Act on it there.")
+        );
+        assert_eq!(
+            intent_details(&runner, "inspect_of_source_copy"),
+            vec![format!("{read}: big.rs")]
+        );
+    }
+}
+
+/// An edit's before-text is history only the journal holds: an inspect of an
+/// applied edit is paged, not answered with the file's current text.
+#[tokio::test]
+async fn an_inspect_of_an_applied_edit_is_still_paged() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    fixture.edit();
+    runner.advance().await.unwrap();
+    let edit = runner
+        .task
+        .events
+        .iter()
+        .rposition(|e| e.message.starts_with("Applied edit code.txt"))
+        .unwrap();
+    fixture.conversational(json!({"action":"inspect","event":edit,"offset":0}));
+    advance_to_the_next_action(&fixture, &mut runner).await;
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with(&format!("Journal event {edit}, bytes 0..")),
+        "{}",
+        runner.task.last_response
+    );
+    assert!(intent_details(&runner, "inspect_of_source_copy").is_empty());
+}
+
+/// A runner that has read `big.rs` (shown in full under Source), and the
+/// index of that read.
+async fn read_big_file(fixture: &Fixture) -> (Runner, usize) {
+    std::fs::write(
+        fixture.root.join("big.rs"),
+        (0..60)
+            .map(|n| format!("pub fn f{n}() -> u32 {{ {n} }}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut runner = fixture.interactive().await;
+    fixture.conversational(json!({"action":"read","file":"big.rs"}));
+    runner.advance().await.unwrap();
+    let read = runner
+        .task
+        .events
+        .iter()
+        .rposition(|e| e.message.starts_with("Read big.rs:"))
+        .unwrap();
+    (runner, read)
+}
+
+async fn act(fixture: &Fixture, runner: &mut Runner, action: Value) {
+    fixture.conversational(action);
+    advance_to_the_next_action(fixture, runner).await;
+}
+
+fn inspect_loop_recoveries(runner: &Runner) -> usize {
+    runner
+        .task
+        .events
+        .iter()
+        .filter(|e| e.message.starts_with("Harness recovery (inspect loop"))
+        .count()
+}
+
+/// Two inspects of a current Source copy, with a search between them: the
+/// inspect guard's run ends at the search, but the empty-look count runs to
+/// the last progress, so the second is an inspect loop and the harness
+/// recovers instead of answering it.
+#[tokio::test]
+async fn a_second_empty_look_since_progress_recovers() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let (mut runner, read) = read_big_file(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":0}),
+    )
+    .await;
+    assert!(runner
+        .task
+        .last_response
+        .starts_with(&format!("Event {read} holds an earlier copy of `big.rs`")));
+    assert_eq!(inspect_loop_recoveries(&runner), 0);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"search","query":"f1"}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":352}),
+    )
+    .await;
+    assert_eq!(
+        inspect_loop_recoveries(&runner),
+        1,
+        "{}",
+        runner.task.last_response
+    );
+    assert_ne!(runner.task.phase, Phase::AwaitingInput);
+    assert_eq!(intent_details(&runner, "empty_look").len(), 1);
+    assert_eq!(intent_details(&runner, "empty_look_repeated").len(), 1);
+}
+
+/// A page asked for again since the last progress is served again (the
+/// model no longer has it) but counted; the next empty look recovers. An
+/// applied edit starts a new stretch.
+#[tokio::test]
+async fn a_repeated_page_is_served_once_more_then_recovers_and_an_edit_resets() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":0,"offset":0}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"search","query":"original"}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":0,"offset":0}),
+    )
+    .await;
+    assert!(
+        runner
+            .task
+            .last_response
+            .starts_with("Journal event 0, bytes 0.."),
+        "{}",
+        runner.task.last_response
+    );
+    assert_eq!(intent_details(&runner, "empty_look").len(), 1);
+    // An applied edit is progress: the stretch restarts. The page is still
+    // the Last result, so this look is empty, but it is the first since the
+    // edit: counted, no recovery.
+    fixture.edit();
+    advance_to_the_next_action(&fixture, &mut runner).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":0,"offset":0}),
+    )
+    .await;
+    assert_eq!(inspect_loop_recoveries(&runner), 0);
+    assert_eq!(intent_details(&runner, "empty_look").len(), 2);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"search","query":"changed"}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":0,"offset":0}),
+    )
+    .await;
+    assert_eq!(inspect_loop_recoveries(&runner), 1);
+}
+
+/// The count survives a reload (it is journaled with the task), and a human
+/// message is progress: it starts a new stretch.
+#[tokio::test]
+async fn empty_looks_survive_a_reload_and_a_human_message_resets_them() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = Fixture::new().await;
+    let (mut runner, read) = read_big_file(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":0}),
+    )
+    .await;
+    let id = runner.task.id.clone();
+    drop(runner);
+    let mut runner = reload(&fixture, &id);
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"search","query":"f1"}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":0}),
+    )
+    .await;
+    assert_eq!(inspect_loop_recoveries(&runner), 1);
+
+    let fixture = Fixture::new().await;
+    let (mut runner, read) = read_big_file(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":0}),
+    )
+    .await;
+    runner
+        .submit_message("Look at big.rs again.".into())
+        .await
+        .unwrap();
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":0}),
+    )
+    .await;
+    assert_eq!(inspect_loop_recoveries(&runner), 0);
+    assert_eq!(intent_details(&runner, "empty_look").len(), 2);
+}
+
+/// With recovery off the second empty look parks, as the other loops do; with
+/// the count off the old run-based guard alone applies.
+#[tokio::test]
+async fn empty_looks_park_with_recovery_off_and_are_ignored_with_the_count_off() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    {
+        let _recover_off = RecoverOff::set();
+        let fixture = Fixture::new().await;
+        let (mut runner, read) = read_big_file(&fixture).await;
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"inspect","event":read,"offset":0}),
+        )
+        .await;
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"search","query":"f1"}),
+        )
+        .await;
+        fixture.conversational(json!({"action":"inspect","event":read,"offset":0}));
+        fixture.reply("harness_missing", json!({"missing":[]}));
+        runner.advance().await.unwrap();
+        assert_eq!(runner.task.phase, Phase::AwaitingInput);
+        assert!(runner
+            .task
+            .events
+            .iter()
+            .any(|e| e.message.starts_with("Inspect loop:")));
+    }
+    std::env::set_var("MOOSEDEV_HARNESS_EMPTY_LOOKS", "off");
+    let fixture = Fixture::new().await;
+    let (mut runner, read) = read_big_file(&fixture).await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":0}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"search","query":"f1"}),
+    )
+    .await;
+    act(
+        &fixture,
+        &mut runner,
+        json!({"action":"inspect","event":read,"offset":0}),
+    )
+    .await;
+    std::env::remove_var("MOOSEDEV_HARNESS_EMPTY_LOOKS");
+    assert_eq!(inspect_loop_recoveries(&runner), 0);
+    assert!(runner
+        .task
+        .last_response
+        .starts_with(&format!("Event {read} holds an earlier copy")));
 }
 
 /// The model's own question is the human's stop: recovery leaves it waiting.

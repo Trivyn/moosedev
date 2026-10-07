@@ -108,12 +108,91 @@ def drop_focus_block(prompt, case):
     return prompt if end < 0 else prompt[:start] + prompt[end + len(closing):]
 
 
+PAGED = re.compile(r"\[bytes \d+\.\.\d+ of (\d+) not shown here; inspect\((\d+), \d+\) pages them\]")
+SOURCE_HELD = re.compile(r"^(?:Read|Applied edit|Served read of a file shown in full:|Served outlined read:|Served read outside scope:)"
+                         r" ?([\w./-]+?)[: (\n]")
+
+
+def _source_full(case):
+    """The files the journaled request showed in full under Source."""
+    if "source_full" not in case:
+        entry = json.loads(Path(case["journal"]).read_text())["model_requests"][case["request"]]
+        case["source_full"] = set(entry.get("source_full") or [])
+    return case["source_full"]
+
+
+def pointer_line(event, text, size, source_full, plan_whole):
+    """How the pointer renderer shows a recent event that does not fit whole:
+    where its whole text is, never half of it."""
+    first = text.split("\n", 1)[0][:160]
+    held = SOURCE_HELD.match(text)
+    action = None
+    if text.startswith("Model action: "):
+        try:
+            action = json.loads(text[len("Model action: "):].split("\n", 1)[0])
+        except json.JSONDecodeError:
+            action = None
+    file = held.group(1) if held else (action or {}).get("file")
+    if file and file in source_full and (held or (action or {}).get("action") in ("edit", "replace", "write")):
+        label = first if held else f"Model action: {action['action']} {file}"
+        return f"Event {event}: {label} - the file's current text is under Source."
+    if plan_whole and ((action or {}).get("action") in ("plan", "replan") or text.startswith("Proposed plan:")):
+        return f"Event {event}: your plan - shown above as the plan."
+    return f"Event {event}: {first} ({size} bytes; inspect({event}, 0) shows it whole)"
+
+
+def pointer_observations(prompt, case):
+    """Recent observations without half copies: each cut preview becomes a
+    pointer to where the whole text is (Source, the plan, or the journal)."""
+    start = prompt.find("Recent observations")
+    if start < 0:
+        return prompt
+    end = prompt.index("Last result:", start)
+    section = prompt[start:end]
+    open_list = section.index("[")
+    entries, length = json.JSONDecoder().raw_decode(section[open_list:])
+    source_full = _source_full(case)
+    plan_whole = "[Plan shown in part" not in prompt and "[Plan cut" not in prompt
+    rewritten = []
+    for entry in entries:
+        paged = PAGED.search(entry)
+        if not paged:
+            rewritten.append(entry)
+            continue
+        event, size = int(paged.group(2)), int(paged.group(1))
+        text = entry.split(": ", 1)[1]
+        rewritten.append(pointer_line(event, text, size, source_full, plan_whole))
+    return prompt[:start] + section[:open_list] + json.dumps(rewritten) + section[open_list + length:] + prompt[end:]
+
+
+def pointer_checks(prompt, case):
+    """Check output previews without half copies: a cut preview becomes one
+    line naming the event that holds the whole output."""
+    start = prompt.find("Check output previews:")
+    if start < 0:
+        return prompt
+    end = prompt.index("Last result:", start)
+    body = prompt[start + len("Check output previews:"):end]
+    parts = re.split(r"(?m)^(?=Check \d+: )", body)
+    out = []
+    for part in parts:
+        paged = PAGED.search(part)
+        if part.startswith("Check ") and paged:
+            label = part.split(":", 1)[0]
+            out.append(f"{label}: ({paged.group(1)} bytes; inspect({paged.group(2)}, 0) shows it whole)\n")
+        else:
+            out.append(part)
+    return prompt[:start] + "Check output previews:" + "".join(out) + prompt[end:]
+
+
 TRANSFORMS = {
     "as_is": lambda prompt, case: prompt,
     "no_shortened_copies": drop_shortened_copies,
     "no_shortened_copies_no_hint": lambda prompt, case: drop_shortened_copies(prompt, case, hint=False),
     "no_inspect": remove_inspect,
     "no_focus": drop_focus_block,
+    "pointer_observations": pointer_observations,
+    "pointer_checks": pointer_checks,
 }
 
 

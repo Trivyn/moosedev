@@ -1115,7 +1115,33 @@ the question action, its `Assistant:` echo and the `Human response:` are
 listed as shown there (`Task.answered_question`, cleared at the model's next
 action). Before, the answer reached the model only as the guidance line, away
 from its question, whose preview was cut at 352 bytes: in simH4 prompt 4 qwen
-asked the same question six times and paged its own words in between. A page the
+asked the same question six times and paged its own words in between. A
+recent event that does not fit its share of the list is one line saying where
+its whole text is, never a cut copy: a read, edit or served read of a file
+Source shows in full says "current text under Source", the model's plan says
+"shown above as the plan" while the plan line is that stored plan, whole,
+and anything else gives its size and the journal event that holds it, with
+no invitation to page it (a replay of simH5's inspect decisions showed the
+model takes whatever inspect the list offers: pointers that offered one moved
+6 of 31 decisions); a check output the Last result does not hold reads the
+same way. An edit's line points at the file's current text
+without offering a page, though its before-text stays pageable. An inspect of
+a read whose text is still the file's current text, shown in full under
+Source, is answered with that fact instead of a page
+(`inspect_of_source_copy`); an edit or an older version is paged as before.
+Files are matched against the known paths, never parsed out of the event, and
+the reserve counts the list at its cap. An inspect that can return nothing new is an
+empty look: a current copy of a file under Source (answered with that fact),
+the page the prompt showed as the Last result (refused), or a page already
+asked for since the last progress (served again). The second empty look since
+the last progress (a human message, harness recovery, applied edit or proposed
+plan; other actions do not end the stretch) is an inspect loop: the harness
+recovers (`empty_look_repeated`) instead of answering it. The inspect guard's
+run ends at any other action, so in simH5 98 exact repeats broken up by reads
+and searches went unseen; 112 of 229 inspects were empty looks.
+`MOOSEDEV_HARNESS_EMPTY_LOOKS=off` turns the count off. In simH5 the cut copies drew 229 inspects (98
+exact repeats, 149 at the cut's offset), 44 of them of text Source already
+held. `MOOSEDEV_HARNESS_POINTER_OBSERVATIONS=off` restores the cut previews. A page the
 model asks for again in the current run of inspects (back to its last other
 action or a human message) is served again once it has left the prompt
 (`inspect_served_again`): the model no longer has it. It is refused while it

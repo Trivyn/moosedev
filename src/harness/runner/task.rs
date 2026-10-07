@@ -574,6 +574,10 @@ pub struct Task {
     /// action ([`Runner::note_human_response`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) answered_question: Option<AnsweredQuestion>,
+    /// Journal indices of the inspects that could return nothing new; the
+    /// second since the last progress is an inspect loop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) empty_looks: Vec<usize>,
     /// Cancellation is durable even when scratch cleanup must be retried.
     #[serde(default)]
     pub cleanup_pending: bool,

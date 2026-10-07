@@ -1443,6 +1443,21 @@ impl Drop for ServeShownOff {
     }
 }
 
+/// Sets `MOOSEDEV_HARNESS_EMPTY_LOOKS=off` for a test's life: only the
+/// inspect guard's run-based ladder applies. Hold `ENVIRONMENT`.
+pub(super) struct EmptyLooksOff;
+impl EmptyLooksOff {
+    pub(super) fn set() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_EMPTY_LOOKS", "off");
+        Self
+    }
+}
+impl Drop for EmptyLooksOff {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_EMPTY_LOOKS");
+    }
+}
+
 /// Sets `MOOSEDEV_HARNESS_RECOVER=off` for a test's life: a model-stuck
 /// stop parks for the human, as before recover-don't-park (AD ad50c9cd), so
 /// a test can check the park's detection and message. Hold `ENVIRONMENT`.

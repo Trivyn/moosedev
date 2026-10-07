@@ -931,7 +931,7 @@ impl Runner {
         }
         if shown {
             return Some(format!(
-                "`{file}` is unchanged and its current text is the Last result (served at event {latest}). {next}, or inspect event {latest}."
+                "`{file}` is unchanged and its current text is the Last result (served at event {latest}). {next}."
             ));
         }
         if refused_before || serves.len() > 1 {
