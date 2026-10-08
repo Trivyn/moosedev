@@ -578,6 +578,11 @@ pub struct Task {
     /// second since the last progress is an inspect loop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) empty_looks: Vec<usize>,
+    /// The only actions the next model step offers, after a looking loop's
+    /// recovery while a required check fails (rung 3); cleared at the next
+    /// model action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) narrowed_actions: Option<Vec<String>>,
     /// Cancellation is durable even when scratch cleanup must be retried.
     #[serde(default)]
     pub cleanup_pending: bool,

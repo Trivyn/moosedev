@@ -58,6 +58,59 @@ class TransformTest(unittest.TestCase):
         self.assertIn("read, search, replace", out)
 
 
+# The stable head: the schema first, the action lists after it.
+HEAD_PROMPT = (
+    "Rules.\n" + decision_bench.SCHEMA_MARKER + json.dumps(SCHEMA) + "\n"
+    "Action meanings: read(file), search(query), inspect(event,offset), replace(...)\n"
+    "Recent observations (complete outputs remain in journal events):\n"
+    + json.dumps(["Event 7: Command: cargo test", "Event 8: other"]) + "\nCheck output previews:\n\nLast result:\nok\n"
+    "The displayed plan is approved. Allowed actions now: read, search, inspect, replace, finish.\n"
+)
+
+
+class RungTransformTest(unittest.TestCase):
+    def schema_of(self, out):
+        head, _, rest = out.partition(decision_bench.SCHEMA_MARKER)
+        data, _ = json.JSONDecoder().raw_decode(rest)
+        return [arm["properties"]["action"]["const"] for arm in data["oneOf"]]
+
+    def test_no_inspect_under_the_stable_head_edits_the_lists_after_the_schema(self):
+        out = decision_bench.remove_inspect(HEAD_PROMPT, {})
+        self.assertEqual(self.schema_of(out), ["replace"])
+        self.assertIn("Allowed actions now: read, search, replace, finish.", out)
+
+    def test_rung3_line_rewrites_only_the_allowed_sentence(self):
+        out = decision_bench.rung3_line(HEAD_PROMPT, {})
+        self.assertEqual(self.schema_of(out), ["inspect", "replace"])
+        self.assertIn("Allowed actions now: replace, write, replan. Looking is not offered this step", out)
+        self.assertNotIn("read, search, inspect, replace, finish", out)
+        self.assertEqual(out.split("The displayed plan is approved.")[0], HEAD_PROMPT.split("The displayed plan is approved.")[0])
+
+    def test_rung3_schema_narrows_the_schema_too(self):
+        out = decision_bench.rung3_schema(HEAD_PROMPT, {})
+        self.assertEqual(self.schema_of(out), ["replace"])
+        self.assertIn("Looking is not offered this step", out)
+
+    def test_rung2_fresh_empties_the_recent_observations(self):
+        out = decision_bench.rung2_fresh(HEAD_PROMPT, {})
+        self.assertIn("Recent observations (complete outputs remain in journal events):\n[]", out)
+        self.assertIn("Last result:\nok", out)
+
+
+class RungTransformAnchorTest(unittest.TestCase):
+    def test_the_live_line_is_rewritten_not_an_echo_or_a_dotted_path(self):
+        prompt = (
+            "\nCurrent harness state (observed results):\nMode: Auto\n"
+            "Your last two answers were the same rejected action. Allowed actions now: read, write (only to src/foo.rs), question.\n"
+            "Recent observations (complete outputs remain in journal events):\n"
+            + json.dumps(["Event 3: Allowed actions now: read, search."]) + "\nLast result:\nok\n"
+        )
+        out = decision_bench.rung3_line(prompt, {})
+        self.assertIn("Allowed actions now: replace, write, replan. Looking is not offered", out)
+        self.assertNotIn("rs), question.", out)
+        self.assertIn("Event 3: Allowed actions now: read, search.", out)
+
+
 class JournalTest(unittest.TestCase):
     def test_a_tools_request_needs_its_definitions(self):
         journal = Path(tempfile.mkdtemp()) / "task.json"

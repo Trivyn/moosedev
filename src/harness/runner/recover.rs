@@ -23,6 +23,31 @@ pub(super) const HARNESS_RECOVERY: &str = "Harness recovery";
 
 /// `MOOSEDEV_HARNESS_RECOVER=off` parks every model-stuck stop for the
 /// human, as before.
+/// How rung 3 narrows the step after a looking loop's recovery while a
+/// required check fails: `line` (the allowed-actions sentence and
+/// validation; the cached head is untouched), `schema` (the schema and tools
+/// too), or `off`. `MOOSEDEV_HARNESS_RUNG3`; off by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Rung3 {
+    Off,
+    Line,
+    Schema,
+}
+
+pub(super) fn rung3() -> Rung3 {
+    match std::env::var("MOOSEDEV_HARNESS_RUNG3")
+        .as_deref()
+        .map(str::trim)
+    {
+        Ok("line") => Rung3::Line,
+        Ok("schema") => Rung3::Schema,
+        _ => Rung3::Off,
+    }
+}
+
+/// The looking loops rung 3 answers.
+const LOOKING_LOOPS: [&str; 3] = ["inspect loop", "read loop", "search loop"];
+
 pub(super) fn recover_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_RECOVER").map_or(true, |value| value.trim() != "off")
 }
@@ -80,7 +105,41 @@ impl Runner {
             } else {
                 "Continue: take the plan's next step with what is shown."
             };
-            let guidance = format!("{facts}\n{next}");
+            // Rung 3: in Auto, a looking loop while a required check fails
+            // against this source is the model owing an edit; the next step
+            // offers only the actions that make one (simH6: 26 of 27 Auto
+            // inspect-loop recoveries, after which 19 inspected again).
+            let failing = (rung3() != Rung3::Off
+                && self.task.mode == Mode::Auto
+                && LOOKING_LOOPS.contains(&kind))
+            // A sandbox denial needs a grant or the human, not an edit.
+            .then(|| {
+                self.untested_failure()
+                    .filter(|failure| !failure.denied && !failure.ungrantable)
+                    .map(|failure| failure.command.clone())
+            })
+            .flatten();
+            let mut guidance = format!("{facts}\n{next}");
+            // A recovery of any other kind does not inherit a narrowing.
+            self.task.narrowed_actions = None;
+            if let Some(command) = failing {
+                let mut actions = vec![
+                    "replace".to_owned(),
+                    "write".to_owned(),
+                    "replan".to_owned(),
+                ];
+                if self.fixes_offerable() {
+                    actions.push("apply_fix".to_owned());
+                }
+                self.intent_event(
+                    "actions_narrowed",
+                    &format!("{kind}: {}", actions.join(", ")),
+                );
+                guidance.push_str(&format!(
+                    "\nThis step offers only edits: the required check `{command}` fails against the current source, and the change it needs is yours to make."
+                ));
+                self.task.narrowed_actions = Some(actions);
+            }
             self.forget_failure();
             self.end_unchanged_window();
             self.task.recovery = None;
@@ -117,6 +176,21 @@ impl Runner {
     pub(super) fn progressed(&mut self) {
         self.task.stuck_recoveries = 0;
         self.task.best_effort = None;
+        self.task.narrowed_actions = None;
+    }
+
+    /// The actions rung 3 offers for this step, if it narrowed it (Auto,
+    /// working).
+    /// The repair lever's own narrowing, when it holds, decides the offer;
+    /// and a narrowing journaled under another setting does not apply once
+    /// rung 3 is off.
+    pub(super) fn step_actions(&self) -> Option<&[String]> {
+        self.task.narrowed_actions.as_deref().filter(|_| {
+            rung3() != Rung3::Off
+                && self.task.mode == Mode::Auto
+                && self.task.phase == Phase::Working
+                && self.narrowed_files().is_none()
+        })
     }
 
     /// The ladder's last rung. With an approved plan in Auto, the plan's

@@ -6170,3 +6170,182 @@ async fn a_plan_leaving_rules_of_the_named_spec_open_goes_back_once() {
     assert!(runner.task.plan.is_some(), "stored");
     assert!(intent_details(&runner, "spec_deferral_returned").is_empty());
 }
+
+/// Sets `MOOSEDEV_HARNESS_RUNG3` for a test's life. Hold `ENVIRONMENT`.
+struct Rung3Set;
+impl Rung3Set {
+    fn to(value: &str) -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_RUNG3", value);
+        Self
+    }
+}
+impl Drop for Rung3Set {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_RUNG3");
+    }
+}
+
+/// A second edit to the helper the setup added.
+fn edit_helper_again(fixture: &Fixture) {
+    fixture.conversational(json!({"action":"replace","file":"labels.py","old_text":"    return value.strip()\n","new_text":"    return value.strip().lower()\n"}));
+}
+
+/// Auto, an approved plan whose required check failed against the current
+/// source, with no edit since.
+async fn failing_check_runner(fixture: &Fixture) -> Runner {
+    let mut runner = planned_symbolic_runner(fixture).await;
+    runner.task.plan.as_mut().unwrap().checks =
+        vec!["sh -c 'echo assertion failed; exit 1'".into()];
+    runner.approve_plan().await.unwrap();
+    add_helper(fixture);
+    runner.advance().await.unwrap();
+    runner.advance().await.unwrap();
+    fixture.conversational(json!({"action":"finish","summary":"The helper is implemented."}));
+    runner.advance().await.unwrap();
+    if runner.task.phase == Phase::AwaitingReview {
+        fixture.shared.lock().unwrap().revision_on_accept = Some("accepted-links".into());
+        runner.review(true).await.unwrap();
+    }
+    for _ in 0..4 {
+        match runner.task.phase {
+            Phase::Verifying | Phase::Working
+                if runner
+                    .task
+                    .symbolic
+                    .as_ref()
+                    .unwrap()
+                    .last_failure
+                    .is_none() =>
+            {
+                runner.advance().await.unwrap()
+            }
+            Phase::AwaitingReview => runner.confirm_no_knowledge().await.unwrap(),
+            _ => break,
+        }
+    }
+    let failure = runner
+        .task
+        .symbolic
+        .as_ref()
+        .unwrap()
+        .last_failure
+        .clone()
+        .expect("a failed required check");
+    assert_eq!(failure.edits, runner.task.edits.len());
+    assert_eq!(runner.task.phase, Phase::Working);
+    runner
+}
+
+/// Inspects of one page, with searches between, until the harness recovers
+/// from the inspect loop (the steer may answer the first would-be stop).
+async fn inspect_until_recovered(fixture: &Fixture, runner: &mut Runner) {
+    for n in 0..8 {
+        for action in [
+            json!({"action":"inspect","event":0,"offset":0}),
+            json!({"action":"search","query":format!("q{n}")}),
+        ] {
+            if inspect_loop_recoveries(runner) > 0 {
+                return;
+            }
+            fixture.conversational(action);
+            for _ in 0..4 {
+                if fixture.shared.lock().unwrap().replies.is_empty() {
+                    break;
+                }
+                runner.advance().await.unwrap();
+            }
+        }
+    }
+    panic!("no inspect-loop recovery");
+}
+
+/// Rung 3, `line`: after a looking loop's recovery while a required check
+/// fails against this source, the next step's allowed actions are only the
+/// edits; an inspect is refused by validation; one model action later the
+/// narrowing is gone. The head schema is untouched.
+#[tokio::test]
+async fn rung3_line_offers_only_edits_for_one_step_after_a_looking_loop() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _rung3 = Rung3Set::to("line");
+    let fixture = symbolic_fixture().await;
+    let mut runner = failing_check_runner(&fixture).await;
+    inspect_until_recovered(&fixture, &mut runner).await;
+    assert_eq!(
+        intent_details(&runner, "actions_narrowed").len(),
+        1,
+        "{:?}",
+        runner.task.last_response
+    );
+    // The model answers with an inspect, then (repaired) with an edit.
+    fixture.conversational(json!({"action":"inspect","event":0,"offset":0}));
+    edit_helper_again(&fixture);
+    runner.advance().await.unwrap();
+    let narrowed = narrowed_request(&fixture);
+    let prompt = prompt_of(&narrowed);
+    assert!(
+        prompt.contains("Allowed actions now: replace, write, replan"),
+        "{}",
+        observations_of(&prompt)
+    );
+    // `line` keeps the cached head: the offered schema is unchanged.
+    assert!(offered_actions(&narrowed).contains(&"inspect".to_owned()));
+    assert!(runner
+        .task
+        .events
+        .iter()
+        .any(|e| e.message.starts_with("Applied edit labels.py")));
+    assert!(serde_json::to_value(&runner.task).unwrap()["narrowed_actions"].is_null());
+}
+
+/// The text of a recorded model request's messages.
+fn prompt_of(request: &Value) -> String {
+    request["body"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The last action request rung 3 narrowed.
+fn narrowed_request(fixture: &Fixture) -> Value {
+    requests_of_kind(fixture, "model")
+        .into_iter()
+        .filter(|r| r["schema"] == "harness_action")
+        .rev()
+        .find(|r| prompt_of(r).contains("Looking is not offered this step"))
+        .expect("a narrowed request")
+}
+
+/// Rung 3, `schema`: the narrowed step's schema holds only the edits.
+#[tokio::test]
+async fn rung3_schema_narrows_the_schema_too() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _rung3 = Rung3Set::to("schema");
+    let fixture = symbolic_fixture().await;
+    let mut runner = failing_check_runner(&fixture).await;
+    inspect_until_recovered(&fixture, &mut runner).await;
+    edit_helper_again(&fixture);
+    runner.advance().await.unwrap();
+    let offered = offered_actions(&narrowed_request(&fixture));
+    assert!(!offered.contains(&"inspect".to_owned()), "{offered:?}");
+    assert!(!offered.contains(&"read".to_owned()), "{offered:?}");
+    assert!(offered.contains(&"replace".to_owned()), "{offered:?}");
+}
+
+/// No narrowing with rung 3 off, or without a failing check.
+#[tokio::test]
+async fn rung3_does_not_narrow_when_off_or_without_a_failing_check() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let fixture = symbolic_fixture().await;
+    let mut runner = failing_check_runner(&fixture).await;
+    inspect_until_recovered(&fixture, &mut runner).await;
+    assert!(intent_details(&runner, "actions_narrowed").is_empty());
+    let _rung3 = Rung3Set::to("line");
+    let fixture = symbolic_fixture().await;
+    let mut runner = planned_symbolic_runner(&fixture).await;
+    runner.approve_plan().await.unwrap();
+    inspect_until_recovered(&fixture, &mut runner).await;
+    assert!(intent_details(&runner, "actions_narrowed").is_empty());
+}

@@ -506,11 +506,14 @@ impl Runner {
         // asking, so the scope check below lets its edit through.
         self.auto_scope_add(&action).await;
         let Some(action) = self.symbolic_intercept(action)? else {
+            // The action was consumed: rung 3's narrowing was for this step.
+            self.task.narrowed_actions = None;
             self.source_outlines_seen();
             return self.persist();
         };
         self.validate_permission(&action)?;
         if self.read_new_edit_target(&action, &context).await? == Some(false) {
+            self.task.narrowed_actions = None;
             self.candidate_accepted();
             self.source_outlines_seen();
             if !message.trim().is_empty() {
@@ -541,6 +544,7 @@ impl Runner {
         self.task.steps += 1;
         self.task.handed_back = false;
         self.task.answered_question = None;
+        self.task.narrowed_actions = None;
         self.task.plan_stands_park = false;
         self.event(format!("Model action: {}", serde_json::to_string(&step)?));
         self.persist()?;

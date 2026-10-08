@@ -303,7 +303,7 @@ impl Runner {
     /// The required check that failed against exactly the current source:
     /// nothing has been edited since it ran, so running it again would only
     /// repeat the result.
-    fn untested_failure(&self) -> Option<&FailedRun> {
+    pub(in crate::harness::runner) fn untested_failure(&self) -> Option<&FailedRun> {
         let edits = self.task.edits.len();
         self.task
             .symbolic

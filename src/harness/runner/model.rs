@@ -1514,6 +1514,13 @@ impl Runner {
     /// or an exact rerun of a command nothing could have changed. Used only
     /// to choose among several calls in one response.
     fn would_refuse(&self, name: &str, arguments: &Map<String, Value>) -> bool {
+        // Rung 3: a call outside this step's offer is refused.
+        if self
+            .step_actions()
+            .is_some_and(|actions| !actions.iter().any(|action| action == name))
+        {
+            return true;
+        }
         match name {
             "read" => arguments
                 .get("file")
@@ -1885,11 +1892,14 @@ impl Runner {
         if fixes && stable {
             state.push_str(FIX_MEANING);
         }
-        state.push_str(&match (self.task.mode, self.narrowed_files()) {
-            (Mode::Plan, _) => PLAN_MODE_ACTIONS.to_owned(),
-            (Mode::Auto, Some(files)) => narrowed_actions(files),
-            (Mode::Auto, None) => auto_mode_actions(fixes),
-        });
+        state.push_str(
+            &match (self.task.mode, self.narrowed_files(), self.step_actions()) {
+                (Mode::Plan, _, _) => PLAN_MODE_ACTIONS.to_owned(),
+                (Mode::Auto, Some(files), _) => narrowed_actions(files),
+                (Mode::Auto, None, Some(actions)) => step_actions_line(actions),
+                (Mode::Auto, None, None) => auto_mode_actions(fixes),
+            },
+        );
         if self.task.mode == Mode::Plan {
             state.push_str(&plan_rule_echo(&context.governing_rules, &states));
         }
@@ -2677,6 +2687,27 @@ pub(super) fn narrowed_schema(files: &[String], conversational: bool) -> Value {
 }
 
 pub(super) const NARROWED_ACTION_NAMES: [&str; 3] = ["read", "write", "question"];
+
+/// The Auto schema holding only `actions` (rung 3's `schema` variant).
+pub(super) fn step_schema(actions: &[String], fixes: bool, conversational: bool) -> Value {
+    let mut schema = action_schema(Mode::Auto, fixes);
+    retain_actions(&mut schema, |name| {
+        actions.iter().any(|action| action == name)
+    });
+    if conversational {
+        json!({"type":"object","additionalProperties":false,"required":["message","action"],"properties":{"message":{"type":"string"},"action":schema}})
+    } else {
+        schema
+    }
+}
+
+/// What rung 3 allows, for the state section.
+fn step_actions_line(actions: &[String]) -> String {
+    format!(
+        "\nThe displayed plan is approved. Allowed actions now: {}. Looking is not offered this step: a required check fails against the current source, so the next step is the change it needs.",
+        actions.join(", ")
+    )
+}
 
 /// What the narrowed offer allows, for the state section.
 fn narrowed_actions(files: &[String]) -> String {

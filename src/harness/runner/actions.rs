@@ -163,6 +163,18 @@ impl Runner {
     }
 
     pub(super) fn validate_action(&mut self, action: Action) -> Result<Step> {
+        // Rung 3 offers only the actions that change the code this step.
+        if let Some(actions) = self.step_actions() {
+            let name = serde_json::to_value(&action)?["action"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            ensure!(
+                actions.contains(&name),
+                "only {} is offered this step: a required check fails against the current source, so the next step is the change it needs",
+                actions.join(", ")
+            );
+        }
         // A narrowed repair (the repair lever) offers only these; argument
         // values are not schema-checked, so the file list is enforced here.
         if let Some(files) = self.narrowed_files() {

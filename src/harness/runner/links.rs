@@ -53,6 +53,12 @@ impl Runner {
             return super::model::narrowed_schema(files, self.task.batch_capture);
         }
         let fixes = self.fixes_offerable();
+        if let Some(actions) = self
+            .step_actions()
+            .filter(|_| super::recover::rung3() == super::recover::Rung3::Schema)
+        {
+            return super::model::step_schema(actions, fixes, self.task.batch_capture);
+        }
         if self.task.batch_capture {
             conversational_schema(self.task.mode, fixes)
         } else {

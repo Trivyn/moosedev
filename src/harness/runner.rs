@@ -414,6 +414,7 @@ impl Runner {
             stuck_recoveries: 0,
             answered_question: None,
             empty_looks: Vec::new(),
+            narrowed_actions: None,
             cleanup_pending: false,
             source: BTreeMap::new(),
             source_recency: Vec::new(),

@@ -1139,7 +1139,16 @@ plan; other actions do not end the stretch) is an inspect loop: the harness
 recovers (`empty_look_repeated`) instead of answering it. The inspect guard's
 run ends at any other action, so in simH5 98 exact repeats broken up by reads
 and searches went unseen; 112 of 229 inspects were empty looks.
-`MOOSEDEV_HARNESS_EMPTY_LOOKS=off` turns the count off. In simH5 the cut copies drew 229 inspects (98
+`MOOSEDEV_HARNESS_EMPTY_LOOKS=off` turns the count off. Rung 3 of the recovery ladder: after
+a read, inspect or search loop's recovery in Auto, while a required check has
+failed against the current source (not a sandbox denial), the next model step
+offers only replace, write and replan (and `apply_fix` when offered); it is
+cleared at the next model action, by human progress, and at any other
+recovery, and the repair lever's own narrowing takes precedence.
+`MOOSEDEV_HARNESS_RUNG3=line` narrows the allowed-actions line and validation
+only (the cached head is untouched); `=schema` narrows the schema and tools
+too; off by default. In simH6 only 2 of 15 Auto inspect-loop recoveries led
+to an applied edit; 8 looked again. In simH5 the cut copies drew 229 inspects (98
 exact repeats, 149 at the cut's offset), 44 of them of text Source already
 held. `MOOSEDEV_HARNESS_POINTER_OBSERVATIONS=off` restores the cut previews. A page the
 model asks for again in the current run of inspects (back to its last other

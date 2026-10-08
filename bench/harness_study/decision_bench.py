@@ -83,16 +83,76 @@ def drop_shortened_copies(prompt, case, hint=True):
     return prompt[:start] + head + json.dumps(entries) + rest + prompt[end:]
 
 
-def remove_inspect(prompt, case):
-    """No inspect action: out of the schema and the action lists (a tools
-    request's inspect tool is removed from the body by `run`)."""
+def _filter_schema(prompt, keep):
+    """The prompt with its action schema (after the last schema marker, in
+    the stable head or at the end) holding only the actions `keep` accepts;
+    a conversational schema's nested `action` is filtered too."""
     head, marker, schema = prompt.rpartition(SCHEMA_MARKER)
     if not marker:
-        return prompt.replace("inspect(event,offset), ", "").replace("read, search, inspect, ", "read, search, ")
+        return prompt
     data, end = json.JSONDecoder().raw_decode(schema)
-    data["oneOf"] = [arm for arm in data["oneOf"] if arm["properties"]["action"].get("const") != "inspect"]
-    head = head.replace("inspect(event,offset), ", "").replace("read, search, inspect, ", "read, search, ")
+    arms = data if "oneOf" in data else data["properties"]["action"]
+    arms["oneOf"] = [arm for arm in arms["oneOf"] if keep(arm["properties"]["action"].get("const"))]
     return head + marker + json.dumps(data, separators=(",", ":")) + schema[end:]
+
+
+def remove_inspect(prompt, case):
+    """No inspect action: out of the schema and the action lists, wherever
+    they are (a tools request's inspect tool is removed from the body by
+    `run`). Under the stable head the action lists follow the schema."""
+    prompt = _filter_schema(prompt, lambda name: name != "inspect")
+    return prompt.replace("inspect(event,offset), ", "").replace("read, search, inspect, ", "read, search, ")
+
+
+# Rung 3 (the harness's MOOSEDEV_HARNESS_RUNG3): after a looking loop's
+# recovery while a required check fails, the next step offers only edits.
+RUNG3_ACTIONS = ("replace", "write", "replan", "apply_fix")
+# One whole allowed-actions sentence: names, each with an optional
+# parenthetical (which may hold a path with dots), up to the closing period.
+ALLOWED_NOW = re.compile(r"Allowed actions now: (?:[a-z_]+(?: \([^)]*\))?, )*[a-z_]+(?: \([^)]*\))?\.")
+STATE_HEADER = "\nCurrent harness state"
+OBSERVATIONS_HEADER = "Recent observations (complete outputs remain in journal events"
+
+
+def rung3_line(prompt, case):
+    """Rung 3's `line` variant: the allowed-actions sentence lists only the
+    edits; the schema (the cached head) is unchanged."""
+    def line(match):
+        offered = [name for name in RUNG3_ACTIONS if name != "apply_fix" or "apply_fix" in match.group(0)]
+        return (f"Allowed actions now: {', '.join(offered)}. Looking is not offered this step: a required check "
+                "fails against the current source, so the next step is the change it needs.")
+    # The live offer is in the current harness state, before the
+    # observations (which can echo an older line).
+    state = prompt.rfind(STATE_HEADER)
+    end = prompt.find(OBSERVATIONS_HEADER, max(state, 0))
+    window = (state, end if end >= 0 else len(prompt)) if state >= 0 else (0, len(prompt))
+    matches = [m for m in ALLOWED_NOW.finditer(prompt) if window[0] <= m.start() < window[1]]
+    if not matches:
+        return prompt
+    last = matches[-1]
+    return prompt[:last.start()] + line(last) + prompt[last.end():]
+
+
+def rung3_schema(prompt, case):
+    """Rung 3's `schema` variant: the line, and the schema too."""
+    return _filter_schema(rung3_line(prompt, case), lambda name: name in RUNG3_ACTIONS)
+
+
+def rung2_fresh(prompt, case):
+    """Rung 2: a fresh prompt without the looping history: the recent
+    observations list emptied and any recent conversation dropped; the Last
+    result is kept."""
+    start = prompt.rfind(OBSERVATIONS_HEADER)
+    if start >= 0:
+        open_list = prompt.index("[", start)
+        _, length = json.JSONDecoder().raw_decode(prompt[open_list:])
+        prompt = prompt[:open_list] + "[]" + prompt[open_list + length:]
+    conversation = prompt.rfind("\nRecent conversation (historical context")
+    if conversation >= 0:
+        end = prompt.find("\nCurrent human guidance:", conversation)
+        if end > conversation:
+            prompt = prompt[:conversation] + prompt[end + 1:]
+    return prompt
 
 
 def drop_focus_block(prompt, case):
@@ -193,6 +253,9 @@ TRANSFORMS = {
     "no_focus": drop_focus_block,
     "pointer_observations": pointer_observations,
     "pointer_checks": pointer_checks,
+    "rung3_line": rung3_line,
+    "rung3_schema": rung3_schema,
+    "rung2_fresh": rung2_fresh,
 }
 
 
@@ -339,16 +402,20 @@ def run(cases, profile_name, n=5, exe=None, port=7480, root=snapshot.DEFAULT_ROO
             body = json.loads(json.dumps(base))
             prompt = body["messages"][0]["content"]
             body["messages"][0]["content"] = apply_transforms(prompt, case, transform)
-            if "no_inspect" in transform.split("+") and body.get("tools"):
-                body["tools"] = [tool for tool in body["tools"]
-                                 if (tool.get("function") or {}).get("name") != "inspect"]
+            parts = transform.split("+")
+            if body.get("tools") and ("no_inspect" in parts or "rung3_schema" in parts):
+                def offered(name):
+                    if "rung3_schema" in parts and name not in RUNG3_ACTIONS:
+                        return False
+                    return not ("no_inspect" in parts and name == "inspect")
+                body["tools"] = [tool for tool in body["tools"] if offered((tool.get("function") or {}).get("name"))]
             counts = collections.Counter()
             for sample in range(n):
                 text, usage, seconds = send(profile, body)
                 label = classify(text, case.get("check_event"))
                 counts[label] += 1
                 raw.append({"case": case["name"], "transform": transform, "sample": sample, "class": label,
-                            "seconds": round(seconds, 2), "usage": usage, "text": text[:1500]})
+                            "seconds": round(seconds, 2), "usage": usage, "text": text[:20000]})
             results[(case["name"], transform)] = counts
     if out:
         Path(out).write_text(json.dumps(raw, indent=1) + "\n")
