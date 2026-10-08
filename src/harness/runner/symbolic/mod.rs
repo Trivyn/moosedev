@@ -32,7 +32,9 @@ use state::{NoteAnswer, CAPTURE_NOTE_QUESTION, INCOMPLETE_NOTE_QUESTION};
 /// approved files. `MOOSEDEV_HARNESS_REPLAN_HOLD=off` lets every replan
 /// through, as before.
 fn replan_hold_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_REPLAN_HOLD").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_REPLAN_HOLD").map_or(true, |value| value.trim() != "off")
 }
 
 /// Opens the answer to a search asked again: the stored result, repeated.
@@ -327,6 +329,11 @@ impl Runner {
     ) -> Result<Step> {
         if !error.is::<NoopEdit>() {
             return Err(error);
+        }
+        // The lean profile reports the no-op and leaves the next step to the
+        // model, rather than deciding it (a finish, or a repair).
+        if crate::harness::runner::profile::lean() {
+            return Err(error.context("the file already reads this way; the edit changes nothing"));
         }
         if let Some(failure) = self.untested_failure() {
             return Err(error.context(format!(

@@ -38,7 +38,10 @@ pub struct RepairState {
 /// an identical rejected repeat the harness narrows what may be sent, or stops
 /// spending attempts. `MOOSEDEV_HARNESS_NARROW_REPAIR=off` removes the lever.
 fn narrowing_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_NARROW_REPAIR").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_NARROW_REPAIR")
+            .map_or(true, |value| value.trim() != "off")
 }
 
 /// The action a journaled response proposed: the `action` object of a

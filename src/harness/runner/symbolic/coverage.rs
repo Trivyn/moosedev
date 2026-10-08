@@ -14,7 +14,10 @@ const COVERAGE_NOTE_CLAIM_BYTES: usize = 8_000;
 /// `MOOSEDEV_HARNESS_SPEC_DEFERRAL=off` lets a plan defer rules of the spec it
 /// implements without a return, as before.
 fn spec_deferral_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_SPEC_DEFERRAL").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_SPEC_DEFERRAL")
+            .map_or(true, |value| value.trim() != "off")
 }
 
 impl Runner {
@@ -170,7 +173,8 @@ impl Runner {
             return false;
         }
         let returns = self.symbolic_state_mut().coverage_returns;
-        if returns >= thresholds.return_limit {
+        // The lean profile returns no plan: its return limit is 0.
+        if crate::harness::runner::profile::lean() || returns >= thresholds.return_limit {
             let names: Vec<String> = unmet
                 .iter()
                 .map(|rule| format!("{} ({})", rule.label, rule.iri))

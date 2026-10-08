@@ -6349,3 +6349,34 @@ async fn rung3_does_not_narrow_when_off_or_without_a_failing_check() {
     inspect_until_recovered(&fixture, &mut runner).await;
     assert!(intent_details(&runner, "actions_narrowed").is_empty());
 }
+
+/// The lean profile never parks or recovers on a repeated failure: the loop
+/// detector's focus block stays as information.
+#[tokio::test]
+async fn the_lean_profile_never_stops_on_a_repeated_failure() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _lean = LeanProfile::set();
+    let fixture = symbolic_fixture().await;
+    let mut runner = failing_check_runner(&fixture).await;
+    for _ in 0..5 {
+        fixture.conversational(
+            json!({"action":"command","command":"sh -c 'echo assertion failed; exit 1'"}),
+        );
+        for _ in 0..4 {
+            if fixture.shared.lock().unwrap().replies.is_empty() {
+                break;
+            }
+            runner.advance().await.unwrap();
+        }
+    }
+    assert!(!runner
+        .task
+        .events
+        .iter()
+        .any(|e| e.message.starts_with("Harness recovery")));
+    assert_ne!(runner.task.phase, Phase::AwaitingInput);
+    assert!(intent_details(&runner, "stalled_failure_parked").is_empty());
+    // The focus block is information on every sighting from the second on.
+    let focus = intent_details(&runner, "stalled_failure_focus");
+    assert!(focus.len() >= 4, "{focus:?}");
+}

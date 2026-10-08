@@ -37,7 +37,9 @@ pub(in crate::harness::runner) const AUTO_VERIFY_NOTE: &str = "All planned files
 pub(in crate::harness::runner) const AUTO_VERIFY_FAILED: &str = "The harness ran the plan's required checks after your last edit (every planned file edited, no language-server findings). A check failed; fix what it reports. The checks run again after your next clean edit, or when you finish.";
 
 fn enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_AUTO_VERIFY").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_AUTO_VERIFY").map_or(true, |value| value.trim() != "off")
 }
 
 impl Runner {

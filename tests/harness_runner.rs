@@ -5887,6 +5887,93 @@ async fn empty_looks_park_with_recovery_off_and_are_ignored_with_the_count_off()
         .starts_with(&format!("Event {read} holds an earlier copy")));
 }
 
+/// The lean profile lets the model look freely: every re-read and every
+/// repeated page is served, never refused.
+#[tokio::test]
+async fn the_lean_profile_serves_every_reread_and_repeated_page() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _lean = LeanProfile::set();
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.interactive().await;
+    for _ in 0..4 {
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"read","file":"code.txt"}),
+        )
+        .await;
+    }
+    for _ in 0..4 {
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"inspect","event":0,"offset":0}),
+        )
+        .await;
+    }
+    let refused = runner
+        .task
+        .events
+        .iter()
+        .filter(|e| {
+            e.message.starts_with("Not read again") || e.message.starts_with("Not shown again")
+        })
+        .count();
+    assert_eq!(refused, 0);
+    assert_eq!(inspect_loop_recoveries(&runner), 0);
+    assert!(runner
+        .task
+        .last_response
+        .starts_with("Journal event 0, bytes 0.."));
+    assert_ne!(runner.task.phase, Phase::AwaitingInput);
+}
+
+/// The lean profile reruns an identical command, and a finish with a planned
+/// file unedited runs the required checks instead of being sent back.
+#[tokio::test]
+async fn the_lean_profile_reruns_commands_and_has_no_finish_gates() {
+    let _env_lock = ENVIRONMENT.lock().await;
+    let _lean = LeanProfile::set();
+    let fixture = Fixture::new().await;
+    let mut runner = fixture.approved_interactive().await;
+    for _ in 0..3 {
+        act(
+            &fixture,
+            &mut runner,
+            json!({"action":"command","command":"echo hi"}),
+        )
+        .await;
+    }
+    let runs = runner
+        .task
+        .events
+        .iter()
+        .filter(|e| e.message.starts_with("Command: echo hi\n"))
+        .count();
+    assert_eq!(runs, 3);
+    fixture.conversational(json!({"action":"finish","summary":"Done."}));
+    fixture.note("Nothing beyond the diff.");
+    fixture.typed(vec![]);
+    for _ in 0..6 {
+        match runner.task.phase {
+            Phase::AwaitingReview => runner.confirm_no_knowledge().await.unwrap(),
+            Phase::Verifying | Phase::Working if !runner.task.phase.is_finished() => {
+                runner.advance().await.unwrap()
+            }
+            _ => break,
+        }
+        if runner.task.phase.is_finished() {
+            break;
+        }
+    }
+    assert_eq!(
+        runner.task.phase,
+        Phase::Complete,
+        "{}",
+        runner.task.last_response
+    );
+}
+
 /// The model's own question is the human's stop: recovery leaves it waiting.
 #[tokio::test]
 async fn a_model_question_still_waits_with_recovery_on() {

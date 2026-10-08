@@ -595,8 +595,10 @@ fn pointer_line(index: usize, message: &str) -> String {
 /// `MOOSEDEV_HARNESS_POINTER_OBSERVATIONS=off` lists a recent event that does
 /// not fit as a cut preview (head, tail and the page between), as before.
 pub(super) fn pointer_observations_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_POINTER_OBSERVATIONS")
-        .map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_POINTER_OBSERVATIONS")
+            .map_or(true, |value| value.trim() != "off")
 }
 
 /// What the prompt being built shows whole besides the observations: the

@@ -421,7 +421,9 @@ impl Runner {
         let tests = failed_tests(output);
         let revisited = revisit.map(|revisit| revisit.at);
         let edits = self.task.edits.len();
-        if count >= PARK_AT {
+        // The lean profile never parks or recovers on a repeated failure;
+        // the focus block below is information, shown on every sighting.
+        if count >= PARK_AT && !crate::harness::runner::profile::lean() {
             self.intent_event(
                 "stalled_failure_parked",
                 &format!("{what}, {count} times at edit {edits}: {command}"),
@@ -463,7 +465,10 @@ impl Runner {
         }
         // A required check that names its failing test shows where to look
         // the first time it fails.
-        if count != FOCUS_AT && !first {
+        if count != FOCUS_AT
+            && !first
+            && !(crate::harness::runner::profile::lean() && count > FOCUS_AT)
+        {
             // A source returned to with no run says what is known of it.
             return revisit.filter(|_| no_run).map(|Revisit { at, failed_there }| {
                 if failed_there {

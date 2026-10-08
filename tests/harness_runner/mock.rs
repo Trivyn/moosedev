@@ -1443,6 +1443,21 @@ impl Drop for ServeShownOff {
     }
 }
 
+/// Sets `MOOSEDEV_HARNESS_PROFILE=lean` for a test's life. Hold
+/// `ENVIRONMENT`.
+pub(super) struct LeanProfile;
+impl LeanProfile {
+    pub(super) fn set() -> Self {
+        std::env::set_var("MOOSEDEV_HARNESS_PROFILE", "lean");
+        Self
+    }
+}
+impl Drop for LeanProfile {
+    fn drop(&mut self) {
+        std::env::remove_var("MOOSEDEV_HARNESS_PROFILE");
+    }
+}
+
 /// Sets `MOOSEDEV_HARNESS_EMPTY_LOOKS=off` for a test's life: only the
 /// inspect guard's run-based ladder applies. Hold `ENVIRONMENT`.
 pub(super) struct EmptyLooksOff;

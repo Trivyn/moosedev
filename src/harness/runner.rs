@@ -37,6 +37,7 @@ mod model;
 mod permissions;
 mod plan_choices;
 mod plan_view;
+mod profile;
 mod recover;
 mod recovery;
 mod review;

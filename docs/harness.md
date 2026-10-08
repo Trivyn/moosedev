@@ -1148,7 +1148,21 @@ recovery, and the repair lever's own narrowing takes precedence.
 `MOOSEDEV_HARNESS_RUNG3=line` narrows the allowed-actions line and validation
 only (the cached head is untouched); `=schema` narrows the schema and tools
 too; off by default. In simH6 only 2 of 15 Auto inspect-loop recoveries led
-to an applied edit; 8 looked again. In simH5 the cut copies drew 229 inspects (98
+to an applied edit; 8 looked again. `MOOSEDEV_HARNESS_PROFILE=lean` is the
+lean profile, an experiment against plain coding agents: the harness keeps its
+grounding (knowledge, rules, the objective gather, the plan view, whole
+source, language-server findings and the focus block), its identity (plan
+approval, the final required checks, capture) and its safety (sandbox and
+permissions, the action contract, the step cap), and switches off the
+controls on the model's own actions. Every re-read, page and command rerun
+is served; a repeated search runs again; there are no finish gates, finish
+guard, vacuous-check return, replan continuation or edit-grounding hold; the
+loop detector shows its focus block but never stops the task; the search
+park, empty looks, pointer observations, replan hold, write guard,
+reapplied-insertion no-op, auto-verify, auto-fix, missing question,
+structural question, repair narrowing, spec deferral and coverage return are
+off. Recovery stays only as the hard stop for the step cap, an overflow and
+repeatedly rejected output. In simH5 the cut copies drew 229 inspects (98
 exact repeats, 149 at the cut's offset), 44 of them of text Source already
 held. `MOOSEDEV_HARNESS_POINTER_OBSERVATIONS=off` restores the cut previews. A page the
 model asks for again in the current run of inspects (back to its last other

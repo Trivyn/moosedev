@@ -23,7 +23,10 @@ fn scope_auto_add_enabled() -> bool {
 /// nor is planned asks the human. `MOOSEDEV_HARNESS_STRUCTURAL_ASK=off` leaves
 /// it to the model, as before, for study variants.
 fn structural_ask_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_STRUCTURAL_ASK").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_STRUCTURAL_ASK")
+            .map_or(true, |value| value.trim() != "off")
 }
 
 /// Where a missing module is wanted, as the question and its answers say

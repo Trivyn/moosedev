@@ -528,9 +528,13 @@ impl Runner {
                 .symbolic_noop_continuation(error)
                 .map_err(|error| error.context(model::InvalidModelOutput))?,
         };
-        let step = self
-            .symbolic_finish_guard(step)
-            .map_err(|error| error.context(model::InvalidModelOutput))?;
+        // The lean profile lets a finish rerun the checks.
+        let step = if crate::harness::runner::profile::lean() {
+            step
+        } else {
+            self.symbolic_finish_guard(step)
+                .map_err(|error| error.context(model::InvalidModelOutput))?
+        };
         self.candidate_accepted();
         self.source_outlines_seen();
         // What the prompt that produced this action showed as the Last
@@ -635,7 +639,12 @@ impl Runner {
                 } else {
                     "edit, run a check, or finish if the work is done."
                 };
-                if let Some(answer) = self.repeat_search_answer(&query, next) {
+                // The lean profile searches again rather than answering from
+                // the cache (which also drops the repository matches).
+                if let Some(answer) = (!crate::harness::runner::profile::lean())
+                    .then(|| self.repeat_search_answer(&query, next))
+                    .flatten()
+                {
                     if self.park_repeated_search(&query) {
                         return self.persist();
                     }
@@ -770,9 +779,11 @@ impl Runner {
                 }
                 // Edits reach here only in Auto and only for files already read:
                 // the first-edit guard turns an unread edit into a read.
-                if self
-                    .ground_edit(&file, before.as_deref(), after.as_deref())
-                    .await
+                // The lean profile applies the edit without the grounding hold.
+                if !crate::harness::runner::profile::lean()
+                    && self
+                        .ground_edit(&file, before.as_deref(), after.as_deref())
+                        .await
                 {
                     return self.persist();
                 }
@@ -889,7 +900,11 @@ impl Runner {
             Step::Replan { reason } if self.task.mode == Mode::Plan => {
                 self.symbolic_replan_noop(&reason);
             }
-            Step::Replan { reason } if proposed_replan && self.replan_changes_nothing() => {
+            Step::Replan { reason }
+                if proposed_replan
+                    && !crate::harness::runner::profile::lean()
+                    && self.replan_changes_nothing() =>
+            {
                 self.symbolic_replan_continuation(&reason);
                 self.ground_disputed_plan(&reason).await;
             }
@@ -965,7 +980,11 @@ impl Runner {
         // The best-effort finish runs the checks whatever the source holds:
         // the gates that send the model back first are for a model that can
         // still act on them.
-        if self.task.best_effort.is_none() && self.finish_gate_refused()? {
+        // The lean profile has no finish gates: the required checks decide.
+        if self.task.best_effort.is_none()
+            && !crate::harness::runner::profile::lean()
+            && self.finish_gate_refused()?
+        {
             return self.persist();
         }
         self.task.last_response = summary;
@@ -1334,6 +1353,7 @@ impl Runner {
                 // A best-effort finish has no model step left to add a test.
                 if !scaffold
                     && self.task.best_effort.is_none()
+                    && !crate::harness::runner::profile::lean()
                     && self.vacuous_returns() < VACUOUS_RETURN_LIMIT
                 {
                     self.intent_event("check_vacuous_returned", &command);
@@ -1427,14 +1447,18 @@ const SEARCH_REPEAT_PARKED: &str = "Search repeated after its stored answer:";
 /// `MOOSEDEV_HARNESS_SEARCH_PARK=off` keeps answering a repeated search
 /// from its stored result without ever parking.
 fn search_park_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_SEARCH_PARK").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_SEARCH_PARK").map_or(true, |value| value.trim() != "off")
 }
 pub(super) const READ_REFUSED: &str = "Not read again:";
 
 /// `MOOSEDEV_HARNESS_EMPTY_LOOKS=off` leaves inspects that can return
 /// nothing new to the inspect guard's run alone.
 fn empty_looks_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_EMPTY_LOOKS").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_EMPTY_LOOKS").map_or(true, |value| value.trim() != "off")
 }
 
 /// Whether an inspect of a page that has left the prompt is served again
@@ -1688,6 +1712,10 @@ impl Runner {
     /// registry four times in a row). A capture checkpoint's confirmation or
     /// review is no such change ([`review::is_human_progress`]).
     pub(super) fn unchanged_command_run(&self, command: &str) -> Option<usize> {
+        // The lean profile reruns any command: no refusal.
+        if crate::harness::runner::profile::lean() {
+            return None;
+        }
         let prefix = format!("Command: {command}\nPermission grants: ");
         let last = self
             .task
@@ -1801,6 +1829,8 @@ impl Runner {
     /// Source (simH5: 44 inspects of such copies; Lesson 4574e273). An edit,
     /// or an older version, is history only the journal holds.
     fn source_copy(&self, event: usize) -> Option<String> {
+        // Off with pointer observations (and so under the lean profile): the
+        // page is served.
         if !model::pointer_observations_enabled() {
             return None;
         }
@@ -1908,6 +1938,10 @@ impl Runner {
         before: usize,
         shown: &str,
     ) -> bool {
+        // The lean profile serves every page: no refusal.
+        if crate::harness::runner::profile::lean() {
+            return false;
+        }
         let earlier = self.inspect_requests_before(event, offset, before);
         !earlier.is_empty()
             && (!inspect_reserve_enabled()
@@ -2170,7 +2204,11 @@ impl Runner {
         // A file shown in full that the Last result cannot hold whole is not
         // served a part of: the copy under Source is the whole text, and a
         // part would then be refused as a repeat.
-        if matches!(serve, Serve::Shown) && whole.len() > budget {
+        // The lean profile pages such a file instead of refusing it.
+        if !crate::harness::runner::profile::lean()
+            && matches!(serve, Serve::Shown)
+            && whole.len() > budget
+        {
             let reason = self
                 .redundant_read(file)
                 .unwrap_or_else(|| format!("{file} is shown in full under Source."));

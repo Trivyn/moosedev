@@ -168,7 +168,9 @@ pub(super) fn gather_enabled() -> bool {
 /// `MOOSEDEV_HARNESS_ASK_MISSING=off` parks without asking the model what is
 /// missing.
 fn ask_missing_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_ASK_MISSING").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_ASK_MISSING").map_or(true, |value| value.trim() != "off")
 }
 
 /// Whether a repository path is searched for the objective's words: not a

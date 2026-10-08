@@ -578,7 +578,9 @@ impl Runner {
 /// declares is refused. `MOOSEDEV_HARNESS_WRITE_GUARD=off` applies it, as
 /// before.
 fn write_guard_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_WRITE_GUARD").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_WRITE_GUARD").map_or(true, |value| value.trim() != "off")
 }
 
 /// Declarations a refused write's message names at most.
@@ -720,7 +722,10 @@ fn escaped_newline_in_code(file: &str, text: &str) -> Option<usize> {
 /// Whether an outlined file's re-read is served as the Last result.
 /// `MOOSEDEV_HARNESS_SERVE_OUTLINED=off` refuses it instead, as before.
 fn serve_outlined_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_SERVE_OUTLINED").map_or(true, |value| value.trim() != "off")
+    // The lean profile serves every re-read, whatever the switch says.
+    crate::harness::runner::profile::lean()
+        || std::env::var("MOOSEDEV_HARNESS_SERVE_OUTLINED")
+            .map_or(true, |value| value.trim() != "off")
 }
 
 /// Whether a file outside the step's scope, asked for again after its serve
@@ -761,7 +766,8 @@ pub(super) fn shown_text_response(file: &str, text: &str) -> String {
 /// `MOOSEDEV_HARNESS_SERVE_SHOWN=off` refuses a read of a file the prompt
 /// shows in full, as before.
 fn serve_shown_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_SERVE_SHOWN").map_or(true, |value| value.trim() != "off")
+    crate::harness::runner::profile::lean()
+        || std::env::var("MOOSEDEV_HARNESS_SERVE_SHOWN").map_or(true, |value| value.trim() != "off")
 }
 
 /// The journal prefix of a read outside the step's scope the harness served.
@@ -932,6 +938,10 @@ impl Runner {
     /// run: a model re-reading in a loop meets a refusal, then parks as any
     /// repeated refusal does.
     fn served_repeat(&self, file: &str, next: &str) -> Option<String> {
+        // The lean profile serves every re-read: no refusal.
+        if crate::harness::runner::profile::lean() {
+            return None;
+        }
         let ServeHistory {
             serves,
             shown,
@@ -1058,6 +1068,10 @@ impl Runner {
     /// invents one (`cd /home/user/project && cargo test`: four times over
     /// badciv runs 7 and 8), which only fails and costs a step.
     fn without_missing_cd(&mut self, command: String) -> String {
+        // The lean profile runs the command as written.
+        if crate::harness::runner::profile::lean() {
+            return command;
+        }
         let Some((path, rest)) = missing_cd(&command, |path| path.exists()) else {
             return command;
         };
@@ -1216,8 +1230,10 @@ fn stale_text_enabled() -> bool {
 /// `MOOSEDEV_HARNESS_REAPPLIED_INSERTION=off` applies an insertion the file
 /// already holds again, as before.
 fn reapplied_insertion_enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_REAPPLIED_INSERTION")
-        .map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_REAPPLIED_INSERTION")
+            .map_or(true, |value| value.trim() != "off")
 }
 
 /// Whether `new_text` is `old_text` with text added around it, and the file

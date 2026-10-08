@@ -41,7 +41,9 @@ fn panicking_calls(text: &str) -> usize {
 }
 
 fn enabled() -> bool {
-    std::env::var("MOOSEDEV_HARNESS_AUTO_FIX").map_or(true, |value| value.trim() != "off")
+    // Off under the lean profile: a control on the model's own actions.
+    !crate::harness::runner::profile::lean()
+        && std::env::var("MOOSEDEV_HARNESS_AUTO_FIX").map_or(true, |value| value.trim() != "off")
 }
 
 impl Runner {
