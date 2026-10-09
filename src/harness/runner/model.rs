@@ -123,9 +123,27 @@ const FIX_MEANING: &str = "apply_fix(fix) applies a quick fix the language serve
 const JOB: &str = "\nYour job: read, edit, run checks, finish. The harness derives purpose, obligations and code associations from the approved plan and the diff; at the end you answer one plain question about what you learned.\n";
 /// While planning the model may only gather context, talk or propose the plan: editing,
 /// execution and finishing wait for approval, and a replan while planning changes nothing.
-const PLAN_MODE_ACTION_NAMES: [&str; 6] =
-    ["read", "search", "inspect", "question", "reply", "plan"];
+/// A command while planning is a look the harness answers ([`super::looks`]).
+fn plan_mode_action_names() -> &'static [&'static str] {
+    if super::looks::enabled() {
+        &[
+            "read", "search", "inspect", "command", "question", "reply", "plan",
+        ]
+    } else {
+        &["read", "search", "inspect", "question", "reply", "plan"]
+    }
+}
 const PLAN_MODE_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, question, reply, plan. Editing and execution require human plan approval.";
+const PLAN_MODE_LOOK_ACTIONS: &str = "\nAllowed actions now: read, search, inspect, command, question, reply, plan. While planning, a command is a read-only look the harness answers: view, list or grep files, ask toolchain versions or build to see where things stand, read git history, read a dependency's source. Anything that would change something is declined: put it in the plan. Editing requires human plan approval.";
+
+/// The Plan-mode allowed-actions line, naming exactly the offered actions.
+fn plan_mode_actions() -> &'static str {
+    if super::looks::enabled() {
+        PLAN_MODE_LOOK_ACTIONS
+    } else {
+        PLAN_MODE_ACTIONS
+    }
+}
 const AUTO_MODE_ACTIONS: &str = "\nThe displayed plan is approved. Allowed actions now: read, search, inspect, replace, write, command, request_permission, question, reply, replan, finish. Do not propose the same plan again or repeat completed edits. Avoid rereading unchanged source already supplied in full. If the current code meets the objective, choose finish next to run required checks and request final review. A replan with nothing new since approval does not reopen planning.";
 
 /// [`AUTO_MODE_ACTIONS`], listing `apply_fix` when the schema offers it.
@@ -1896,7 +1914,7 @@ impl Runner {
         }
         state.push_str(
             &match (self.task.mode, self.narrowed_files(), self.step_actions()) {
-                (Mode::Plan, _, _) => PLAN_MODE_ACTIONS.to_owned(),
+                (Mode::Plan, _, _) => plan_mode_actions().to_owned(),
                 (Mode::Auto, Some(files), _) => narrowed_actions(files),
                 (Mode::Auto, None, Some(actions)) => step_actions_line(actions),
                 (Mode::Auto, None, None) => auto_mode_actions(fixes),
@@ -2754,7 +2772,9 @@ pub(super) fn action_schema(mode: Mode, fixes: bool) -> Value {
     let a = json!({"type":"array","items":{"type":"string"}});
     let mut actions = json!({"oneOf":[variant("inspect",&[("event",json!({"type":"integer","minimum":0})),("offset",json!({"type":"integer","minimum":0}))]),variant("reply",&[("message",s.clone()),("then",json!({"type":"string","enum":["wait","continue"]}))]),variant("read",&[("file",s.clone())]),variant("search",&[("query",s.clone())]),variant("plan",&[("summary",json!({"type":"string","maxLength":MAX_PLAN_SUMMARY})),("files",a.clone()),("checks",a.clone()),("addresses",a.clone()),("satisfied",a.clone()),("stubs",a.clone()),("unchanged",a.clone()),("open_choices",plan_choices::schema())]),variant("replace",&[("file",s.clone()),("old_text",s.clone()),("new_text",s.clone())]),variant("write",&[("file",s.clone()),("content",json!({"type":["string","null"]}))]),variant("apply_fix",&[("fix",json!({"type":"integer","minimum":1}))]),variant("command",&[("command",s.clone())]),variant("request_permission",&[("command",s.clone()),("justification",s.clone()),("read_paths",a.clone()),("write_paths",a),("network",json!({"type":"boolean"}))]),variant("question",&[("question",s.clone())]),variant("replan",&[("reason",s.clone())]),variant("finish",&[("summary",s)])]});
     if mode == Mode::Plan {
-        retain_actions(&mut actions, |name| PLAN_MODE_ACTION_NAMES.contains(&name));
+        retain_actions(&mut actions, |name| {
+            plan_mode_action_names().contains(&name)
+        });
     }
     if !plan_choices::enabled() {
         without_plan_field(&mut actions, "open_choices");
@@ -3678,7 +3698,9 @@ mod tests {
         sorted(list.split(", "))
     }
 
-    const PLANNING: [&str; 6] = ["read", "search", "inspect", "question", "reply", "plan"];
+    const PLANNING: [&str; 7] = [
+        "read", "search", "inspect", "command", "question", "reply", "plan",
+    ];
 
     #[test]
     fn plan_mode_schemas_offer_only_planning_actions() {
@@ -3736,11 +3758,16 @@ mod tests {
 
     #[test]
     fn allowed_actions_text_promises_exactly_the_schema_actions() {
-        assert!(!PLAN_MODE_ACTIONS.contains("replan"));
-        assert_eq!(listed(PLAN_MODE_ACTIONS), sorted(PLANNING));
+        assert!(!plan_mode_actions().contains("replan"));
+        assert_eq!(listed(plan_mode_actions()), sorted(PLANNING));
+        assert_eq!(
+            listed(plan_mode_actions()),
+            sorted(variant_names(&action_schema(Mode::Plan, false)))
+        );
+        // Without looks, the old set, promised exactly.
         assert_eq!(
             listed(PLAN_MODE_ACTIONS),
-            sorted(variant_names(&action_schema(Mode::Plan, false)))
+            sorted(PLANNING.into_iter().filter(|name| *name != "command"))
         );
         for fixes in [false, true] {
             let text = auto_mode_actions(fixes);

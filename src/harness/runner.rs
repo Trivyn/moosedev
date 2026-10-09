@@ -33,6 +33,7 @@ mod gather;
 mod index;
 mod langserver;
 mod links;
+mod looks;
 mod model;
 mod permissions;
 mod plan_choices;

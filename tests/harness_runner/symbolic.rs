@@ -388,12 +388,16 @@ async fn model_requests_carry_the_action_schema_for_the_current_mode() {
         3,
         "read and plan while planning, then one edit"
     );
-    let planning = ["inspect", "plan", "question", "read", "reply", "search"];
+    let planning = [
+        "command", "inspect", "plan", "question", "read", "reply", "search",
+    ];
     for request in &actions[..2] {
         assert_eq!(offered_actions(request), planning);
         let prompt = request["body"]["messages"][0]["content"].as_str().unwrap();
         assert!(
-            prompt.contains("Allowed actions now: read, search, inspect, question, reply, plan."),
+            prompt.contains(
+                "Allowed actions now: read, search, inspect, command, question, reply, plan."
+            ),
             "the planning prompt promises exactly the planning actions"
         );
     }

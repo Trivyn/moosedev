@@ -10,8 +10,8 @@ use super::{
     backticked, file_name, join_path, no_settings, note_failed, parent_dir, STUB_MESSAGES,
 };
 use super::{
-    first_matching_subdir, Deferral, FailedTest, FallbackSpec, LanguageSpec, ProducerHooks,
-    Publishes, ServerSpec, StubSyntax,
+    first_matching_subdir, Deferral, FailedTest, FallbackSpec, LanguageSpec, LookTool,
+    ProducerHooks, Publishes, ServerSpec, StubSyntax,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -96,6 +96,26 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
     ],
     // pytest and python need no manifest to run.
     checks: &[],
+    looks: &[
+        LookTool {
+            program: "python3",
+            allowed: &["--version", "-V", "-c"],
+            declined: &[("-m", "it runs a module: use a check after approval")],
+            dependency_roots: &[],
+            answer: None,
+        },
+        LookTool {
+            program: "pip",
+            allowed: &["--version"],
+            declined: &[
+                ("install", "it installs packages: nothing is installed while planning"),
+                ("show", "the project's virtual environment is not in the sandbox, so pip would not see its packages"),
+                ("list", "the project's virtual environment is not in the sandbox, so pip would not see its packages"),
+            ],
+            dependency_roots: &[],
+            answer: None,
+        },
+    ],
     stubs: Some(StubSyntax {
         markers: &["raise NotImplementedError"],
         stub_messages: STUB_MESSAGES,

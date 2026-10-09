@@ -561,6 +561,7 @@ impl Runner {
                 | Step::ReadOutsideScope { .. }
                 | Step::ReadShown { .. }
                 | Step::Search { .. }
+                | Step::Look { .. }
         );
         match step {
             Step::Inspect { event, offset } => {
@@ -607,26 +608,26 @@ impl Runner {
                     &observation.message[offset..end]
                 );
             }
-            Step::Read { file } => {
-                self.read_into_working_set(&file).await?;
-                self.task.last_response = format!("Read {file} with its governing knowledge.");
-                self.serve_read_batch().await?;
+            step @ (Step::Read { .. }
+            | Step::ReadRefused { .. }
+            | Step::ReadOutlined { .. }
+            | Step::ReadShown { .. }
+            | Step::ReadOutsideScope { .. }) => {
+                self.dispatch_read(step, &context).await?;
             }
-            Step::ReadRefused { file, reason } => {
-                self.refuse_read(&file, &reason);
-                self.serve_read_batch().await?;
-            }
-            Step::ReadOutlined { file } => {
-                self.serve_outlined_read(&file, &context, Serve::Outlined)?;
-                self.serve_read_batch().await?;
-            }
-            Step::ReadShown { file } => {
-                self.serve_outlined_read(&file, &context, Serve::Shown)?;
-                self.serve_read_batch().await?;
-            }
-            Step::ReadOutsideScope { file } => {
-                self.serve_outlined_read(&file, &context, Serve::OutsideScope)?;
-                self.serve_read_batch().await?;
+            Step::Look { command } => {
+                let budget = self.next_last_result_budget(&context)?;
+                if self.repeated_look(&command, budget) {
+                    return self.persist();
+                }
+                // A whole-file view is the read the model would have asked
+                // for, judged as one (already shown, outside scope...).
+                if let Some(read) = self.answer_look(&command, &files, budget).await? {
+                    match self.validate_action(read) {
+                        Ok(step) => self.dispatch_read(step, &context).await?,
+                        Err(error) => self.task.last_response = format!("{error:#}"),
+                    }
+                }
             }
             Step::Search { query } => {
                 // A query already asked in this task returns the same records;
@@ -1455,7 +1456,7 @@ pub(super) const READ_REFUSED: &str = "Not read again:";
 
 /// `MOOSEDEV_HARNESS_EMPTY_LOOKS=off` leaves inspects that can return
 /// nothing new to the inspect guard's run alone.
-fn empty_looks_enabled() -> bool {
+pub(super) fn empty_looks_enabled() -> bool {
     // Off under the lean profile: a control on the model's own actions.
     !crate::harness::runner::profile::lean()
         && std::env::var("MOOSEDEV_HARNESS_EMPTY_LOOKS").map_or(true, |value| value.trim() != "off")
@@ -1740,7 +1741,7 @@ impl Runner {
     /// human message or harness recovery, applied edit or proposed plan.
     /// Other actions do not end it, so a loop broken up by them is still one
     /// loop (the search and empty-look guards).
-    fn progress_window_start(&self) -> usize {
+    pub(super) fn progress_window_start(&self) -> usize {
         self.task
             .events
             .iter()
@@ -2093,6 +2094,27 @@ impl Runner {
         Ok(())
     }
 
+    /// A read step: into the working set, refused, or served as the Last
+    /// result, as validation decided.
+    async fn dispatch_read(&mut self, step: Step, context: &ContextResponse) -> Result<()> {
+        match step {
+            Step::Read { file } => {
+                self.read_into_working_set(&file).await?;
+                self.task.last_response = format!("Read {file} with its governing knowledge.");
+            }
+            Step::ReadRefused { file, reason } => self.refuse_read(&file, &reason),
+            Step::ReadOutlined { file } => {
+                self.serve_outlined_read(&file, context, Serve::Outlined)?
+            }
+            Step::ReadShown { file } => self.serve_outlined_read(&file, context, Serve::Shown)?,
+            Step::ReadOutsideScope { file } => {
+                self.serve_outlined_read(&file, context, Serve::OutsideScope)?
+            }
+            _ => anyhow::bail!("not a read step"),
+        }
+        self.serve_read_batch().await
+    }
+
     /// Refuse a read whose file the prompt already covers, leaving the source
     /// tiers as they were. A second refusal of the same file while the model
     /// is only looking (reads, inspects and searches since the last human
@@ -2143,11 +2165,17 @@ impl Runner {
             .iter()
             .enumerate()
             .rev()
-            .take_while(|(_, earlier)| {
+            .take_while(|(index, earlier)| {
                 let message = earlier.message.as_str();
                 let looking = ["read", "inspect", "search"].iter().any(|kind| {
                     message.starts_with(&format!("Model action: {{\"action\":\"{kind}\""))
                 });
+                // A command the harness answered as a look is looking too.
+                let looking = looking
+                    || (message.starts_with("Model action: {\"action\":\"command\"")
+                        && self.task.events.get(index + 1).is_some_and(|next| {
+                            next.message.starts_with(super::looks::LOOK_REQUEST)
+                        }));
                 // An edit a guard turned into a read journals as a read, after
                 // its guard's event: that attempt is progress, not looking.
                 let guarded_edit = ["First-edit guard:", "Edit guard:", "Fix guard:"]

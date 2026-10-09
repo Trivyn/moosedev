@@ -7,8 +7,8 @@ use super::{
     backticked, file_name, join_path, no_settings, note_failed, parent_dir, STUB_MESSAGES,
 };
 use super::{
-    CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, ProducerHooks, Publishes,
-    ServerSpec, StubSyntax,
+    CheckTool, FailedTest, FallbackSpec, LanguageSpec, LinterSpec, LookTool, ProducerHooks,
+    Publishes, ServerSpec, StubSyntax,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -73,6 +73,61 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         ],
         directory_options: &["-C"],
     }],
+    looks: &[
+        LookTool {
+            program: "cargo",
+            allowed: &[
+                "--version",
+                "-V",
+                "metadata",
+                "tree",
+                "build",
+                "check",
+                "test",
+                "clippy",
+                "search",
+            ],
+            declined: &[
+                (
+                    "add",
+                    "it changes Cargo.toml: put the dependency in the plan",
+                ),
+                (
+                    "remove",
+                    "it changes Cargo.toml: put the change in the plan",
+                ),
+                (
+                    "install",
+                    "it installs a program: nothing is installed while planning",
+                ),
+                ("publish", "it publishes the crate"),
+                (
+                    "update",
+                    "it changes Cargo.lock: put the change in the plan",
+                ),
+                (
+                    "fmt",
+                    "it rewrites source: nothing is changed until the plan is approved",
+                ),
+                (
+                    "fix",
+                    "it rewrites source: nothing is changed until the plan is approved",
+                ),
+                ("new", "it creates a crate: put it in the plan"),
+                ("init", "it creates a crate: put it in the plan"),
+                ("run", "it runs the program: use a check after approval"),
+            ],
+            dependency_roots: &[".cargo/registry/src"],
+            answer: Some(cargo_look_answer),
+        },
+        LookTool {
+            program: "rustc",
+            allowed: &["--version", "-V", "--print"],
+            declined: &[],
+            dependency_roots: &[],
+            answer: None,
+        },
+    ],
     stubs: Some(StubSyntax {
         markers: &["unimplemented!(", "todo!("],
         stub_messages: STUB_MESSAGES,
@@ -380,6 +435,47 @@ fn declaration_name(node: tree_sitter::Node<'_>, source: &str) -> Option<String>
         Some(trait_node) => Some(format!("<{ty} as {}>", node_text(trait_node, source)?)),
         None => Some(ty.to_string()),
     }
+}
+
+/// `cargo search <crate>` needs the network, which the sandbox does not
+/// have: the local registry answers whether the crate is available offline,
+/// and at which versions. Every other cargo look runs as asked.
+fn cargo_look_answer(args: &[&str], home: &std::path::Path) -> Option<String> {
+    if args.first() != Some(&"search") {
+        return None;
+    }
+    let name = args.iter().skip(1).find(|arg| !arg.starts_with('-'))?;
+    let mut versions = std::collections::BTreeSet::new();
+    let prefix = format!("{name}-");
+    for kind in ["src", "cache"] {
+        let Ok(registries) = std::fs::read_dir(home.join(".cargo/registry").join(kind)) else {
+            continue;
+        };
+        for registry in registries.flatten() {
+            let Ok(entries) = std::fs::read_dir(registry.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let file = entry.file_name().to_string_lossy().into_owned();
+                let stem = file.strip_suffix(".crate").unwrap_or(&file);
+                if let Some(version) = stem.strip_prefix(&prefix) {
+                    if version.starts_with(|c: char| c.is_ascii_digit()) {
+                        versions.insert(version.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    Some(if versions.is_empty() {
+        format!(
+            "`cargo search` needs the network, which looks do not have. The local cargo registry (~/.cargo/registry) holds no `{name}`: it is not available offline."
+        )
+    } else {
+        format!(
+            "`cargo search` needs the network, which looks do not have. The local cargo registry (~/.cargo/registry) holds `{name}` at {}: available offline. Its source is under ~/.cargo/registry/src/*/{name}-<version>/.",
+            versions.into_iter().collect::<Vec<_>>().join(", ")
+        )
+    })
 }
 
 #[cfg(test)]

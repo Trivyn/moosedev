@@ -46,7 +46,7 @@ pub(super) fn rung3() -> Rung3 {
 }
 
 /// The looking loops rung 3 answers.
-const LOOKING_LOOPS: [&str; 3] = ["inspect loop", "read loop", "search loop"];
+const LOOKING_LOOPS: [&str; 4] = ["inspect loop", "read loop", "search loop", "look loop"];
 
 pub(super) fn recover_enabled() -> bool {
     std::env::var("MOOSEDEV_HARNESS_RECOVER").map_or(true, |value| value.trim() != "off")

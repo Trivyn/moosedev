@@ -48,6 +48,11 @@ pub(crate) struct LanguageSpec {
     /// manifest, searching upward from where they run.
     #[cfg_attr(not(feature = "harness"), allow(dead_code))]
     pub checks: &'static [CheckTool],
+    /// The read-only toolchain questions the harness answers in Plan mode
+    /// (versions, metadata, a build to see where things stand), and what it
+    /// declines with a reason.
+    #[cfg_attr(not(feature = "harness"), allow(dead_code))]
+    pub looks: &'static [LookTool],
     /// How this language marks code as not written yet, and how to tell such
     /// a marker in code from one in a comment or a string. None when the
     /// language has no stub idiom: the finish gate then says nothing.
@@ -292,6 +297,31 @@ pub(crate) struct CheckTool {
     pub directory_options: &'static [&'static str],
 }
 
+/// Answers a look by intent: its arguments and the home directory in, the
+/// answer out; None runs it as asked.
+pub(crate) type LookAnswer = fn(&[&str], &std::path::Path) -> Option<String>;
+
+/// A toolchain program a planning model may ask about (a look request):
+/// which first arguments the harness runs in its read-only sandbox, which it
+/// declines and why, where the language keeps its dependencies' source, and
+/// an answer by intent for a look that cannot run as asked (`cargo search`
+/// needs the network; the local registry answers it).
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LookTool {
+    pub program: &'static str,
+    /// First arguments run as asked (`--version`, `metadata`, `build`).
+    pub allowed: &'static [&'static str],
+    /// First arguments declined, each with its reason.
+    pub declined: &'static [(&'static str, &'static str)],
+    /// Directories under the home directory holding dependency source the
+    /// sandbox can read (`.cargo/registry/src`).
+    pub dependency_roots: &'static [&'static str],
+    /// Answers a look by intent, given its arguments and the home directory;
+    /// None runs it as asked.
+    pub answer: Option<LookAnswer>,
+}
+
 /// A language server the harness runs as a deterministic checker.
 #[cfg_attr(not(feature = "harness"), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
@@ -429,6 +459,12 @@ pub(crate) fn producer_registry() -> &'static [ProducerSpec] {
 #[cfg_attr(not(feature = "harness"), allow(dead_code))]
 pub(crate) fn check_tools() -> impl Iterator<Item = &'static CheckTool> {
     LANGUAGES.iter().flat_map(|language| language.checks.iter())
+}
+
+/// The look tools in `LANGUAGES` order.
+#[cfg_attr(not(feature = "harness"), allow(dead_code))]
+pub(crate) fn look_tools() -> impl Iterator<Item = &'static LookTool> {
+    LANGUAGES.iter().flat_map(|language| language.looks.iter())
 }
 
 /// The language servers in `LANGUAGES` order, each language's in its order.

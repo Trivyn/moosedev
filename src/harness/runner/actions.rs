@@ -87,6 +87,12 @@ pub(super) enum Step {
     Command {
         command: String,
     },
+    /// A command while planning: a look request the harness answers
+    /// ([`super::looks`]). It journals as the command the model proposed.
+    #[serde(rename = "command")]
+    Look {
+        command: String,
+    },
     RequestPermission {
         command: String,
         justification: String,
@@ -147,6 +153,8 @@ impl Runner {
                     );
                 }
             }
+            // While planning, a command is a look the harness answers.
+            Action::Command { .. } if self.task.mode == Mode::Plan && super::looks::enabled() => {}
             Action::Command { .. } | Action::RequestPermission { .. } | Action::Finish { .. } => {
                 ensure!(
                     self.task.mode == Mode::Auto,
@@ -354,6 +362,11 @@ impl Runner {
                     unchanged,
                     open_choices,
                 });
+            }
+            Action::Command { command } if self.task.mode == Mode::Plan => {
+                return Ok(Step::Look {
+                    command: command.clone(),
+                })
             }
             Action::Command { command } => {
                 return Ok(Step::Command {

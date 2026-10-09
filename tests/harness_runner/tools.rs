@@ -4,7 +4,9 @@
 use super::*;
 use moosedev::harness::response::ActionContract;
 
-const PLANNING: [&str; 6] = ["inspect", "plan", "question", "read", "reply", "search"];
+const PLANNING: [&str; 7] = [
+    "command", "inspect", "plan", "question", "read", "reply", "search",
+];
 
 fn action_requests(fixture: &Fixture) -> Vec<Value> {
     requests_of_kind(fixture, "model")

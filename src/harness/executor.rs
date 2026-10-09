@@ -2,6 +2,7 @@
 mod command_line;
 #[cfg(unix)]
 mod fs_ops;
+pub(crate) mod look;
 mod output;
 mod sandbox;
 mod scratch;

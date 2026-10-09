@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 mod consumers;
 #[path = "harness_runner/links.rs"]
 mod links;
+#[path = "harness_runner/looks.rs"]
+mod looks;
 #[path = "harness_runner/mock.rs"]
 mod mock;
 #[path = "harness_runner/receipts.rs"]

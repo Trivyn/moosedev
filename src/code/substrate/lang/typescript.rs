@@ -6,7 +6,8 @@ use std::process::Command;
 
 use super::file_name;
 use super::{
-    first_matching_subdir, CheckTool, LanguageSpec, ProducerHooks, StubSyntax, STUB_MESSAGES,
+    first_matching_subdir, CheckTool, LanguageSpec, LookTool, ProducerHooks, StubSyntax,
+    STUB_MESSAGES,
 };
 use crate::code::substrate::producer::{ProducerSpec, ProducerTarget};
 use crate::code::substrate::scip::SymbolData;
@@ -42,6 +43,26 @@ pub(crate) static LANGUAGE: LanguageSpec = LanguageSpec {
         subcommands: &["test", "run", "start", "ci"],
         directory_options: &["--prefix", "-C"],
     }],
+    looks: &[
+        LookTool {
+            program: "node",
+            allowed: &["--version", "-v"],
+            declined: &[],
+            dependency_roots: &[],
+            answer: None,
+        },
+        LookTool {
+            program: "npm",
+            allowed: &["--version", "-v"],
+            declined: &[
+                ("install", "it installs packages: nothing is installed while planning"),
+                ("ls", "node_modules is not in the sandbox, so npm would not see the installed packages"),
+                ("view", "it needs the network, which looks do not have"),
+            ],
+            dependency_roots: &[],
+            answer: None,
+        },
+    ],
     stubs: Some(StubSyntax {
         markers: &["throw new Error(\"Not implemented\")"],
         stub_messages: STUB_MESSAGES,

@@ -196,6 +196,40 @@ impl Workspace {
     }
 }
 
+/// Whether a project path names something the workspace keeps out of reach
+/// (a protected name at its depth, at any component): a look must not show
+/// it by another route, such as git's history.
+pub(super) fn protected_path(path: &str) -> bool {
+    path.split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .enumerate()
+        .any(|(depth, part)| {
+            protected(part, depth)
+                && !matches!(
+                    part.to_ascii_lowercase().as_str(),
+                    "target" | "build" | "dist"
+                )
+        })
+}
+
+/// The protected names a look keeps out of git's answers, as pathspec globs.
+pub(super) const PROTECTED_GLOBS: &[&str] = &[
+    "**/.env",
+    "**/.env.*",
+    "moosedev.toml",
+    "**/.git/**",
+    "**/.moosedev/**",
+    "**/.cache/**",
+    "**/.agents/**",
+    "**/.codex/**",
+    "**/.claude/**",
+    "**/.ssh/**",
+    "**/.gnupg/**",
+    "**/.aws/**",
+    "**/.azure/**",
+    "**/.kube/**",
+];
+
 fn protected(name: &str, depth: usize) -> bool {
     let lower = name.to_ascii_lowercase();
     // Conventional generated directories are excluded only at the project root;

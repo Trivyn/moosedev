@@ -1139,7 +1139,25 @@ plan; other actions do not end the stretch) is an inspect loop: the harness
 recovers (`empty_look_repeated`) instead of answering it. The inspect guard's
 run ends at any other action, so in simH5 98 exact repeats broken up by reads
 and searches went unseen; 112 of 229 inspects were empty looks.
-`MOOSEDEV_HARNESS_EMPTY_LOOKS=off` turns the count off. Rung 3 of the recovery ladder: after
+`MOOSEDEV_HARNESS_EMPTY_LOOKS=off` turns the count off. Look requests: while
+planning, `command` is offered and answered as a read-only look, never run as
+work (no permission gate, check result, failure memory or capture). A whole-file
+view (`cat`) is the read itself, with its governing knowledge; a line range
+(`head`, `tail`, `sed -n 'a,bp'`), a listing (`ls`, `find`, `tree`, `fd`) and a
+literal grep (`grep`, `rg` with plain flags) are answered from the harness's
+file list; read-only git (status, log, diff, show, blame, ls-files...) runs
+host-side with no pager, external diff, text converter or fsmonitor, since the
+sandbox snapshot omits `.git`; a language's toolchain looks (its `LookTool`s:
+`cargo metadata`, `cargo build`, versions) and anything else read-only run in
+the sandbox with no network and no task write grant; `cargo search` is answered
+from the local registry. Writes, installs, the network and unknown programs are
+declined with the reason and the way forward (put it in the plan). An
+identical look asked again since the last progress is served again as an empty
+look; the second is a look loop and recovers. In simL1 (lean, search only) qwen
+searched 250-309 times a prompt without planning; OpenCode's plan agent left
+planning in minutes with `ls`, globs, a build and the registry.
+`MOOSEDEV_HARNESS_PLAN_LOOKS=off` restores the planning set without `command`.
+Rung 3 of the recovery ladder: after
 a read, inspect or search loop's recovery in Auto, while a required check has
 failed against the current source (not a sandbox denial), the next model step
 offers only replace, write and replan (and `apply_fix` when offered); it is
