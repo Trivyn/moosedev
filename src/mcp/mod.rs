@@ -723,9 +723,8 @@ pub struct ExportGraphArgs {
 /// The MOOSEDev MCP server: the generated tool router plus shared engine state.
 #[derive(Clone)]
 pub struct MooseDevServer {
-    // Read by the `#[tool_handler]`-generated `ServerHandler` impl; the dead-code
-    // pass doesn't attribute that macro-generated use, so silence the lint.
-    #[allow(dead_code)]
+    /// Served by the `ServerHandler` impl (`#[tool_handler(router = …)]`), so
+    /// per-instance changes such as the sparql description reach clients.
     tool_router: ToolRouter<MooseDevServer>,
     state: Arc<AppState>,
 }
@@ -733,10 +732,17 @@ pub struct MooseDevServer {
 #[tool_router]
 impl MooseDevServer {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-            state,
+        let mut tool_router = Self::tool_router();
+        // The term namespaces are read from the loaded ontologies, never written
+        // into the static description (Constraint 19bb4d8a, Lesson ea5e5f24).
+        if let (Some(guidance), Some(route)) = (
+            sparql::namespace_guidance(&state.store),
+            tool_router.map.get_mut("sparql"),
+        ) {
+            let base = route.attr.description.clone().unwrap_or_default();
+            route.attr.description = Some(format!("{base} {guidance}").into());
         }
+        Self { tool_router, state }
     }
 
     /// Health check — confirms the MCP transport is live. Returns "pong".
@@ -1909,7 +1915,7 @@ impl MooseDevServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for MooseDevServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` (alias for `InitializeResult`) is #[non_exhaustive], so it

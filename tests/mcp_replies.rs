@@ -511,3 +511,50 @@ async fn sparql_reply_keeps_result_text_parseable_and_sends_the_note_separately(
     backend.abort();
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+#[tokio::test]
+async fn served_sparql_description_names_the_loaded_term_namespaces() {
+    let data_dir = fresh_data_dir("sparql-namespaces");
+    let socket = runtime::socket_path_for(&data_dir);
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap app state");
+    let decision = state.resolve_class("ArchitecturalDecision").unwrap();
+    let expected = moosedev::sparql::term_namespaces(&state.store);
+    let backend = spawn_backend(MooseDevServer::new(Arc::new(state)), socket.clone()).await;
+    wait_for_socket(&socket).await;
+    let client = connect_client(&socket).await;
+
+    let tools = client.list_all_tools().await.expect("list tools");
+    let sparql = tools
+        .iter()
+        .find(|tool| tool.name == "sparql")
+        .expect("sparql tool");
+    let description = sparql.description.as_deref().unwrap_or_default();
+    assert!(!expected.is_empty());
+    for ns in &expected {
+        assert!(
+            description.contains(&format!("<{}>", ns.namespace)),
+            "{description}"
+        );
+    }
+
+    // A query written from the advertised namespace finds the class.
+    let arch = expected
+        .iter()
+        .find(|ns| decision.starts_with(&ns.namespace))
+        .unwrap();
+    let reply = call_raw(
+        &client,
+        "sparql",
+        json!({"query": format!(
+            "PREFIX a: <{}> ASK {{ a:ArchitecturalDecision ?p ?o }}",
+            arch.namespace
+        )}),
+    )
+    .await;
+    let json: Value = serde_json::from_str(response_text(&reply)).unwrap();
+    assert_eq!(json["boolean"], true);
+
+    client.cancel().await.ok();
+    backend.abort();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

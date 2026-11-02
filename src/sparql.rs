@@ -19,6 +19,7 @@ use moose::entity_index::EntityIndexCache;
 use moose::traits::EngineConfig;
 use moose::types::LlmAssistLevel;
 use moose_mcp::{EngineHandles, McpHostConfig, MooseTools, ToolKind};
+use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNodeRef, TermRef};
 use oxigraph::store::Store;
 use rmcp::model::{CallToolResult, RawContent};
 use serde_json::{json, Value};
@@ -46,6 +47,114 @@ pub const QUERYABLE_GRAPHS: [&str; 8] = [
     ARCH_SHAPES_GRAPH_IRI,
     CODE_SHAPES_GRAPH_IRI,
 ];
+
+/// The OWL declarations that put a term in an ontology's vocabulary. These are
+/// W3C IRIs, not ontology namespaces (Constraint 19bb4d8a).
+const DECLARATIONS: [&str; 3] = [
+    "http://www.w3.org/2002/07/owl#Class",
+    "http://www.w3.org/2002/07/owl#ObjectProperty",
+    "http://www.w3.org/2002/07/owl#DatatypeProperty",
+];
+
+/// A domain ontology's term namespace, as its loaded declarations use it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermNamespace {
+    /// The named graph the ontology is loaded into. Not a term namespace.
+    pub graph: &'static str,
+    /// The IRI prefix the ontology's classes and properties share.
+    pub namespace: String,
+    /// A few of its class local names, alphabetically.
+    pub example_classes: Vec<String>,
+}
+
+/// The term namespace of each domain ontology, read from the store.
+///
+/// An agent writing SPARQL needs these and cannot otherwise learn them: tool
+/// output prints predicates as bare local names, and the graph IRIs the tool
+/// names look like namespaces but are not (Lessons ea5e5f24, 99ac2b84). They
+/// are read, not written down, because the namespaces are regenerable
+/// (Constraint 19bb4d8a). Per graph, the namespace most of its declared terms
+/// share; an ontology with no declarations is left out.
+pub fn term_namespaces(store: &Store) -> Vec<TermNamespace> {
+    [
+        ARCH_DOMAIN_GRAPH_IRI,
+        SE_DOMAIN_GRAPH_IRI,
+        CODE_DOMAIN_GRAPH_IRI,
+    ]
+    .into_iter()
+    .filter_map(|graph| term_namespace(store, graph))
+    .collect()
+}
+
+fn term_namespace(store: &Store, graph: &'static str) -> Option<TermNamespace> {
+    let graph_name = GraphNameRef::NamedNode(NamedNodeRef::new(graph).ok()?);
+    let rdf_type = NamedNodeRef::new_unchecked(moose::RDF_TYPE);
+    let class_kind = DECLARATIONS[0];
+    let mut declared: Vec<(String, bool)> = Vec::new();
+    for kind in DECLARATIONS {
+        let object = TermRef::NamedNode(NamedNodeRef::new_unchecked(kind));
+        for quad in store
+            .quads_for_pattern(None, Some(rdf_type), Some(object), Some(graph_name))
+            .flatten()
+        {
+            if let NamedOrBlankNodeRef::NamedNode(term) = quad.subject.as_ref() {
+                declared.push((term.as_str().to_string(), kind == class_kind));
+            }
+        }
+    }
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for (term, _) in &declared {
+        *counts.entry(namespace_of(term).to_string()).or_default() += 1;
+    }
+    // Most-shared wins; a tie goes to the alphabetically first, so it is stable.
+    let namespace = counts
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))?
+        .0
+        .clone();
+    let mut example_classes: Vec<String> = declared
+        .iter()
+        .filter(|(term, is_class)| *is_class && namespace_of(term) == namespace)
+        .map(|(term, _)| term[namespace.len()..].to_string())
+        .filter(|local| !local.is_empty())
+        .collect();
+    example_classes.sort();
+    example_classes.dedup();
+    example_classes.truncate(3);
+    Some(TermNamespace {
+        graph,
+        namespace,
+        example_classes,
+    })
+}
+
+/// The IRI up to and including its last `#` or `/`.
+fn namespace_of(iri: &str) -> &str {
+    iri.rfind(['#', '/']).map_or(iri, |at| &iri[..=at])
+}
+
+/// The sentence appended to the served `sparql` description, or `None` when
+/// no ontology is loaded.
+pub fn namespace_guidance(store: &Store) -> Option<String> {
+    let namespaces = term_namespaces(store);
+    if namespaces.is_empty() {
+        return None;
+    }
+    let listed = namespaces
+        .iter()
+        .map(|ns| {
+            format!(
+                "<{}> (classes such as {})",
+                ns.namespace,
+                ns.example_classes.join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "Classes and properties live under these term namespaces, read from the loaded ontologies: {listed}. A graph IRI is not a term namespace: `PREFIX x: <graph-iri#>` matches nothing."
+    ))
+}
 
 /// A successful query: the full result as text, plus moose-mcp's advisory
 /// note when an empty result can be explained.

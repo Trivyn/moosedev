@@ -258,3 +258,40 @@ async fn sparql_marks_a_result_cut_at_the_row_cap() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn term_namespaces_come_from_the_loaded_ontologies_not_the_graph_iris() {
+    let (dir, state) = bootstrap("namespaces");
+    let namespaces = sparql::term_namespaces(&state.store);
+    assert_eq!(namespaces.len(), 3, "{namespaces:?}");
+
+    // Derived, never written down: the architecture namespace is the one the
+    // capture classes resolve under.
+    let decision = state.resolve_class("ArchitecturalDecision").unwrap();
+    let arch = namespaces
+        .iter()
+        .find(|ns| decision.starts_with(&ns.namespace))
+        .expect("the capture classes' namespace is listed");
+    assert_eq!(&decision[arch.namespace.len()..], "ArchitecturalDecision");
+    assert!(state.capture.status.starts_with(&arch.namespace));
+
+    for ns in &namespaces {
+        assert!(
+            !ns.namespace.starts_with(ns.graph),
+            "a graph IRI is not a term namespace: {ns:?}"
+        );
+        assert!(ns.namespace.ends_with(['#', '/']), "{ns:?}");
+        assert!(!ns.example_classes.is_empty(), "{ns:?}");
+    }
+
+    let guidance = sparql::namespace_guidance(&state.store).expect("guidance");
+    for ns in &namespaces {
+        assert!(
+            guidance.contains(&format!("<{}>", ns.namespace)),
+            "{guidance}"
+        );
+    }
+    println!("{guidance}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
