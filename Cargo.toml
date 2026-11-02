@@ -10,6 +10,9 @@ license = "Apache-2.0"
 # The closed-source MOOSE engine, consumed as a path dependency.
 # candle-cpu + arctic-s: local embedding backbone (Arctic-Embed-S, 384-dim) for alignment.
 moose = { path = "../moose", features = ["candle-cpu", "arctic-s"] }
+# MOOSE's host-embeddable MCP tools: moosedev's `sparql` runs on its bounded,
+# scoped engine (src/sparql.rs). Only `sparql` is routed.
+moose-mcp = { path = "../moose/crates/moose-mcp" }
 
 # Same oxigraph (Trivyn fork, via [patch] below) MOOSE exposes across its public API.
 # `Store` crosses the moose API boundary, so moosedev must resolve the identical crate.

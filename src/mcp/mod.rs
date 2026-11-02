@@ -1812,7 +1812,7 @@ impl MooseDevServer {
 
     /// Run a read-only SPARQL query over the local store.
     #[tool(
-        description = "Run an exact, read-only SPARQL query over the local knowledge store. Use this for deterministic structural reads, exhaustive listings, deduplication checks, and explicit named-graph selection; use `get_relevant_context` for fast topical recall and `query` for relationship synthesis. The default graph is the union of named graphs unless `FROM` is specified. SELECT/ASK return SPARQL JSON; CONSTRUCT/DESCRIBE return N-Triples. Key graphs: project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, shapes https://moosedev.dev/kg/ontology/software-architecture/shapes.",
+        description = "Run an exact, read-only SPARQL query over the local knowledge store. Use this for deterministic structural reads, exhaustive listings, deduplication checks, and explicit named-graph selection; use `get_relevant_context` for fast topical recall and `query` for relationship synthesis. The default graph is the union of the queryable graphs; `FROM`/`FROM NAMED`, `SERVICE` and updates are rejected, so name one graph with `GRAPH <iri> { … }` or range over them with `GRAPH ?g { … }`. Results are row-capped (1000) and time-limited (10 s); a capped SELECT carries `truncated: true`. SELECT/ASK return SPARQL JSON; CONSTRUCT/DESCRIBE return N-Triples. An empty result whose query names terms no graph uses comes with a note suggesting the in-use terms. Key graphs: project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, shapes https://moosedev.dev/kg/ontology/software-architecture/shapes.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1828,10 +1828,15 @@ impl MooseDevServer {
         if query.is_empty() {
             return Ok(tool_error("`query` must not be empty"));
         }
-        // Inferred edges are queryable too — refresh them if a write invalidated them.
-        self.state.ensure_enriched();
-        match sparql::run_query(&self.state.store, query) {
-            Ok(output) => Ok(tool_ok(output)),
+        match sparql::run_query(&self.state, query).await {
+            // The note is its own content block, so the result text stays
+            // parseable as SPARQL JSON.
+            Ok(reply) => Ok(CallToolResult::success(
+                std::iter::once(reply.text)
+                    .chain(reply.note)
+                    .map(Content::text)
+                    .collect(),
+            )),
             Err(e) => Ok(tool_error(format!("SPARQL failed: {e}"))),
         }
     }

@@ -16,7 +16,7 @@ dumping project history into the model context.
 | --- | --- |
 | `get_relevant_context` | Retrieve current project knowledge by topic, or omit the topic for a broad inventory. History is opt-in. |
 | `query` | Ask one focused natural-language question and receive an answer with a symbolic reasoning trace. |
-| `sparql` | Run a read-only SPARQL query. `SELECT` and `ASK` return JSON; `CONSTRUCT` and `DESCRIBE` return N-Triples. |
+| `sparql` | Run a read-only SPARQL query on MOOSE's bounded engine. `SELECT` and `ASK` return JSON; `CONSTRUCT` and `DESCRIBE` return N-Triples. The default graph is the union of the project, provenance, ontology and shape graphs. Name a graph with `GRAPH <iri> { … }`, because `FROM`, `SERVICE` and updates are rejected. Results stop at 1000 rows (marked `truncated`) and 10 seconds. An empty result from a query that uses unknown terms comes with a note suggesting the terms in use. |
 | `get_entity_dossier` | Retrieve the decisions, constraints, lessons, judgments, and observations that govern one code entity. Directly linked records carry their complete claims; component records are listed by title. |
 | `get_provenance` | Find which agent recorded an item and when. |
 

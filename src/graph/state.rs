@@ -124,6 +124,9 @@ pub struct AppState {
     /// which MOOSE class alignment requires since 0.12. `None` until
     /// `build_alignment_index` runs, like `vector_store`.
     pub ontology_oracle: Option<Arc<moose::reasoning::OntologyOracle>>,
+    /// MOOSE's bounded SPARQL engine (moose-mcp), shared by every MCP
+    /// connection so they share one concurrency limit (see [`crate::sparql`]).
+    pub(crate) sparql_tools: Arc<moose_mcp::MooseTools>,
     pub engine_config: EngineConfig,
     pub llm: OpenAiCompatClient,
     /// True only when `MOOSEDEV_LLM_BASE_URL` explicitly opts into an LLM provider.
@@ -272,6 +275,14 @@ impl AppState {
             living_ontology: None,
         };
 
+        let sparql_tools = crate::sparql::build_tools(
+            &store,
+            &llm,
+            &engine_config,
+            &entity_index,
+            &llm_cfg.model,
+        )?;
+
         Ok(Self {
             store,
             entity_index,
@@ -293,6 +304,7 @@ impl AppState {
             session_db: None,
             vector_store: None,
             ontology_oracle: None,
+            sparql_tools,
             data_dir: data_dir.to_path_buf(),
             project_root: RwLock::new(initial_project_root(data_dir)),
             story_checks: std::sync::Mutex::new(crate::stories::StoryCheckRegistry::default()),
