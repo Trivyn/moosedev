@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use moose::shacl::{ShaclReport, ShaclSeverity, ShaclViolation};
-use oxigraph::model::{GraphNameRef, NamedNodeRef, TermRef};
+use oxigraph::model::{GraphNameRef, NamedNodeRef, Term, TermRef};
 
 use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
 use crate::ontology::{
@@ -78,12 +78,13 @@ pub(crate) fn run_project_shacl(state: &AppState) -> anyhow::Result<ShaclReport>
 /// Validate recorded project knowledge against the loaded architecture shapes.
 pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
     let report = run_project_shacl(state)?;
-    let violations = report
+    let mut violations: Vec<Violation> = report
         .violations
         .iter()
         .filter(|v| v.severity == ShaclSeverity::Violation)
         .map(map_violation)
         .collect();
+    violations.extend(unflipped_supersessions(state)?);
     let advisories = crate::graph::under_linked_from_report(state, &report, usize::MAX)
         .into_iter()
         .map(|u| Advisory {
@@ -98,6 +99,94 @@ pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
         advisories,
         shapes_checked: count_target_shapes(state)?,
     })
+}
+
+/// Records retired by a `supersedes` edge whose lifecycle status was never flipped.
+///
+/// A record that is the object of `supersedes` must carry `hasLifecycleStatus
+/// "superseded"`. Only two paths write both halves: `supersede_decision`, atomically,
+/// and `accept_proposed_supersession`, on ratification. An edge asserted any other way
+/// leaves the predecessor in the working set, so recall returns a replaced record as
+/// current — by the time this check was written it had produced three live instances
+/// across the stores, two of them unnoticed for a month.
+///
+/// This is the codebase's only Rust-side violation, and it is a BRIDGE. The rule is
+/// declarative and belongs in the shape graph beside the others:
+///
+/// ```sparql
+/// # sh:sparql, once snarl-shacl supports it
+/// SELECT $this WHERE {
+///     ?replacement :supersedes $this .
+///     $this :hasLifecycleStatus ?status .
+///     FILTER(?status NOT IN ("superseded", "deprecated"))
+/// }
+/// ```
+///
+/// snarl-shacl is SHACL Core today — no `sh:sparql`, and no conditional construct that
+/// can express this — which is the only reason the check lives in Rust. When that
+/// support lands, move the rule into the shapes TTL and delete this.
+///
+/// Semantics match `examples/repair_unflipped_supersessions.rs` exactly, including
+/// skipping a record with no status literal at all, so the detector and the repair can
+/// never disagree about what counts as drift.
+fn unflipped_supersessions(state: &AppState) -> anyhow::Result<Vec<Violation>> {
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let status_predicate = NamedNodeRef::new(&state.capture.status)?;
+
+    // Match the predicate by LOCAL NAME, never a hardcoded namespace (Constraint
+    // 19bb4d8a) — the ontology namespace is volatile and has moved before.
+    let mut retired_by_edge: HashSet<String> = HashSet::new();
+    for quad in state
+        .store
+        .quads_for_pattern(None, None, None, Some(graph.into()))
+    {
+        let quad = quad?;
+        if crate::graph::util::local_name(quad.predicate.as_str()) != "supersedes" {
+            continue;
+        }
+        if let Term::NamedNode(target) = &quad.object {
+            retired_by_edge.insert(target.as_str().to_string());
+        }
+    }
+
+    let mut violations = Vec::new();
+    for iri in retired_by_edge {
+        let subject = NamedNodeRef::new(&iri)?;
+        let statuses: Vec<String> = state
+            .store
+            .quads_for_pattern(
+                Some(subject.into()),
+                Some(status_predicate),
+                None,
+                Some(graph.into()),
+            )
+            .filter_map(|quad| match quad.ok()?.object {
+                Term::Literal(literal) => Some(literal.value().to_string()),
+                _ => None,
+            })
+            .collect();
+        if statuses.is_empty()
+            || statuses
+                .iter()
+                .any(|status| crate::graph::lifecycle::is_retired(status))
+        {
+            continue;
+        }
+        violations.push(Violation {
+            node: iri.clone(),
+            source_shape: "moosedev:UnflippedSupersession".to_string(),
+            path: state.capture.status.clone(),
+            kind: ViolationKind::Other("UnflippedSupersession".to_string()),
+            detail: format!(
+                "{iri} is superseded by another record but its lifecycle status is {}, so it \
+                 stays in the working set and recall returns it as current. Repair with \
+                 `cargo run --release --example repair_unflipped_supersessions`.",
+                statuses.join(", ")
+            ),
+        });
+    }
+    violations.sort_by(|a, b| a.node.cmp(&b.node));
+    Ok(violations)
 }
 
 /// Render a validation report for an agent or human reading MCP output.
