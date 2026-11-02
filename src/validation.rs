@@ -47,7 +47,51 @@ pub struct ValidationReport {
     /// Non-blocking under-linked findings. These do NOT affect `conforms()`;
     /// they nudge the agent to densify the graph via `suggest_links` / `relate`.
     pub advisories: Vec<Advisory>,
+    /// Non-blocking: component paths that match nothing in the repository.
+    /// Components are the only holders of paths, so a moved directory leaves
+    /// exactly one place to fix, and this says where.
+    pub stale_coverage: Vec<StaleCoverage>,
     pub shapes_checked: usize,
+}
+
+/// A component `coversPath` with no file or directory behind it: not created
+/// yet (a spec part still to be built), or moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleCoverage {
+    pub component: String,
+    pub component_iri: String,
+    pub path: String,
+}
+
+/// Every component path that matches nothing under the project root. `.`
+/// always matches; a directory path must be a directory, a file path a file.
+pub fn stale_component_coverage(state: &AppState) -> anyhow::Result<Vec<StaleCoverage>> {
+    let root = state.project_root();
+    let mut stale = Vec::new();
+    for component in crate::graph::load_components(state)? {
+        let Some(iri) = component.iri.clone() else {
+            continue;
+        };
+        for path in &component.covers_paths {
+            if path == crate::graph::COVERS_WHOLE_PROJECT {
+                continue;
+            }
+            let target = root.join(path.trim_end_matches('/'));
+            let present = if path.ends_with('/') {
+                target.is_dir()
+            } else {
+                target.is_file()
+            };
+            if !present {
+                stale.push(StaleCoverage {
+                    component: component.name.clone(),
+                    component_iri: iri.clone(),
+                    path: path.clone(),
+                });
+            }
+        }
+    }
+    Ok(stale)
 }
 
 impl ValidationReport {
@@ -97,6 +141,7 @@ pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
     Ok(ValidationReport {
         violations,
         advisories,
+        stale_coverage: stale_component_coverage(state)?,
         shapes_checked: count_target_shapes(state)?,
     })
 }
@@ -256,6 +301,18 @@ pub fn format_report(report: &ValidationReport) -> String {
             out.push_str(&format!("\n  … and {remaining} more"));
         }
     }
+    if !report.stale_coverage.is_empty() {
+        out.push_str(&format!(
+            "\n\nComponent paths matching no file (non-blocking): {} — not created yet, or moved; declare a moved component's new path with declare_component_paths",
+            report.stale_coverage.len()
+        ));
+        for stale in &report.stale_coverage {
+            out.push_str(&format!(
+                "\n  - component {} covers {}, which matches no file",
+                stale.component, stale.path
+            ));
+        }
+    }
     out
 }
 
@@ -387,10 +444,16 @@ mod tests {
         let report = ValidationReport {
             violations: Vec::new(),
             advisories,
+            stale_coverage: vec![StaleCoverage {
+                component: "sim".into(),
+                component_iri: "urn:sim".into(),
+                path: "sim/".into(),
+            }],
             shapes_checked: 0,
         };
         // Advisories are non-blocking: an all-advisory report still conforms.
         assert!(report.conforms());
+        assert!(format_report(&report).contains("component sim covers sim/, which matches no file"));
         let out = format_report(&report);
         assert!(out.contains("Advisories (SHOULD, non-blocking): 15"));
         assert!(!out.contains("Unsupported constraints skipped"));

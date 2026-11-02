@@ -458,6 +458,81 @@ fn component_records_are_secondary() {
     assert!(!hover.contains("Component context decision"));
 }
 
+/// A file is governed by every component whose paths contain it, read from the
+/// path at dossier time: the most specific is the realized component, and the
+/// enclosing ones (a directory, the whole project) follow, most specific first,
+/// each listing only records not already shown closer in.
+#[test]
+fn components_come_from_path_coverage_including_enclosing_ones() {
+    let state = state_with_substrate("enclosing-components");
+    // Minting realizes the `src/` component; the components below are declared
+    // afterwards and must still take effect, because coverage is read now.
+    let entity_iri = pre_mint_public(&state);
+    let src_component = graph::load_components(&state).unwrap()[0]
+        .iri
+        .clone()
+        .unwrap();
+    let file_component = seed_component(&state, "runtime file", "src/runtime.rs");
+    let project_component = seed_component(&state, "project", graph::COVERS_WHOLE_PROJECT);
+
+    let direct = record(&state, "ArchitecturalDecision", "Direct entity decision");
+    let file_rule = record(&state, "Constraint", "Runtime file rule");
+    let src_rule = record(&state, "Constraint", "Source tree rule");
+    let shared_rule = record(&state, "Constraint", "Rule on src and project");
+    let project_rule = record(&state, "Constraint", "Project-wide rule");
+    graph::relate(&state, &direct, "concerns", &entity_iri).unwrap();
+    graph::relate(&state, &file_rule, "concerns", &file_component).unwrap();
+    graph::relate(&state, &src_rule, "concerns", &src_component).unwrap();
+    graph::relate(&state, &shared_rule, "concerns", &src_component).unwrap();
+    graph::relate(&state, &shared_rule, "concerns", &project_component).unwrap();
+    graph::relate(&state, &project_rule, "concerns", &project_component).unwrap();
+
+    let dossier = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("dossier");
+
+    let titles = |records: &[graph::RecordSummary]| -> Vec<String> {
+        records.iter().map(|record| record.title.clone()).collect()
+    };
+    assert_eq!(
+        dossier.realizes,
+        Some((file_component.clone(), "runtime file".to_string()))
+    );
+    assert_eq!(titles(&dossier.component_records), ["Runtime file rule"]);
+    let enclosing: Vec<(String, String, Vec<String>)> = dossier
+        .enclosing_components
+        .iter()
+        .map(|c| (c.iri.clone(), c.label.clone(), titles(&c.records)))
+        .collect();
+    assert_eq!(enclosing.len(), 2, "{enclosing:?}");
+    assert_eq!(enclosing[0].0, src_component);
+    assert_eq!(enclosing[0].1, "runtime component");
+    let mut src_titles = enclosing[0].2.clone();
+    src_titles.sort();
+    assert_eq!(src_titles, ["Rule on src and project", "Source tree rule"]);
+    // The shared rule is listed once, at the closest component.
+    assert_eq!(
+        enclosing[1],
+        (
+            project_component,
+            "project".to_string(),
+            vec!["Project-wide rule".to_string()]
+        )
+    );
+
+    let exhaustive = graph::render_markdown(&dossier);
+    assert!(exhaustive.contains("**Via component runtime file**"));
+    assert!(exhaustive.contains("**Via enclosing component runtime component**"));
+    assert!(exhaustive.contains("**Via enclosing component project**"));
+    assert!(exhaustive.contains("Project-wide rule"));
+    assert_eq!(exhaustive.matches("Rule on src and project").count(), 1);
+
+    let hover = graph::render_dossier_markdown(&dossier, None, None);
+    assert!(hover.contains("**Enclosing component runtime component**"));
+    assert!(hover.contains("**Enclosing component project**"));
+    assert!(!hover.contains("Project-wide rule"));
+}
+
 /// Deprecated records are hidden, while superseded directly linked records remain visible.
 #[test]
 fn retracted_filtered_and_superseded_shown() {
