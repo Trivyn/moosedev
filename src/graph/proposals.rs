@@ -9,7 +9,7 @@
 //!   status — never the real link edge. So a pending proposal is invisible to
 //!   dossiers and the why-coverage metric (which walk only the real link
 //!   predicates) until it is ratified. Accept materializes the real edge via
-//!   [`link_code`]; reject flips the status and never creates an edge. Both
+//!   [`link_code`](super::link_code::link_code); reject flips the status and never creates an edge. Both
 //!   preserve the node (and its evidence) as audit history.
 //! * **Record** — an ordinary `InformationRecord` subclass instance sitting at
 //!   lifecycle status `proposed` (e.g. from grounded capture). Its queue
@@ -34,7 +34,7 @@ use crate::code::substrate::symbols::normalize_symbol;
 
 use super::capture::require_information_record;
 use super::context::first_literal;
-use super::link_code::{link_code, CodeSelector, LinkCodeOutcome};
+use super::link_code::{link_code_unlocked, CodeSelector, LinkCodeOutcome};
 use super::state::AppState;
 use super::util::{local_name, mint_instance_iri};
 use super::PROJECT_KG_GRAPH_IRI;
@@ -661,7 +661,7 @@ pub fn pending_count(state: &AppState) -> anyhow::Result<usize> {
 
 /// Accept a pending queue entry. For a `Link`, materialize the real edge, then
 /// flip to accepted — if the target symbol no longer resolves at HEAD,
-/// [`link_code`] errors and the proposal stays pending (an honest skip, not a
+/// [`link_code`](super::link_code::link_code) errors and the proposal stays pending (an honest skip, not a
 /// silent broken link). For a `Record`, ratify it in place (`proposed` →
 /// `accepted`); its queued links, if any, remain separate entries.
 pub fn accept_proposal(
@@ -705,7 +705,8 @@ pub fn accept_proposal(
                 );
             }
 
-            let outcome = link_code(
+            // This path already holds the proposal-write lock (not reentrant).
+            let outcome = link_code_unlocked(
                 state,
                 &subject,
                 &predicate,
@@ -771,7 +772,7 @@ pub fn accept_proposal(
 
             // Shape-validated, idempotent; a wrong-range target fails here and
             // the judgment stays pending (honest skip).
-            super::lifecycle::relate(state, &entity_iri, &predicate_local, &target_iri)
+            super::lifecycle::relate_unlocked(state, &entity_iri, &predicate_local, &target_iri)
                 .with_context(|| format!("cannot accept judgment {proposal_iri}"))?;
 
             set_status(state, proposal_iri, ACCEPTED)?;

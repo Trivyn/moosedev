@@ -281,6 +281,7 @@ fn supersede_decision_inner(
         // stale again. Legacy callers deliberately skip this whole-graph read.
         state.try_ensure_enriched()?;
     }
+    let _proposal_guard = state.lock_proposal_writes()?;
     let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
 
     // Precondition: the superseded subject must be a recorded knowledge item — an
@@ -363,7 +364,6 @@ fn supersede_decision_inner(
             _ => "accepted",
         });
     let proposed = effective_status.eq_ignore_ascii_case("proposed");
-    let _proposal_guard = proposed.then(|| state.lock_proposal_writes()).transpose()?;
     if proposed {
         let predecessor_status =
             first_literal(&state.store, &input.superseded_iri, &state.capture.status)
@@ -581,6 +581,9 @@ pub fn retract_decision(
     author: &str,
     when: DateTime<Utc>,
 ) -> anyhow::Result<RetractOutcome> {
+    // Serialized with every other proposal/lifecycle write: the preflight
+    // reads and the status flip must not interleave with an accept/reject.
+    let _guard = state.lock_proposal_writes()?;
     let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let subject = NamedNode::new(target_iri)
         .map_err(|e| anyhow::anyhow!("invalid target IRI {target_iri}: {e}"))?;
@@ -690,6 +693,17 @@ pub struct RelateOutcome {
 /// declares these relations (`supersedes`, `violates`, `isMotivatedBy`, …), but
 /// only `supersede_decision` ever wrote one before.
 pub fn relate(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    object_iri: &str,
+) -> anyhow::Result<RelateOutcome> {
+    let _guard = state.lock_proposal_writes()?;
+    relate_unlocked(state, subject_iri, predicate_local, object_iri)
+}
+
+/// Caller holds `AppState::lock_proposal_writes` across relation validation and mutation.
+pub(crate) fn relate_unlocked(
     state: &AppState,
     subject_iri: &str,
     predicate_local: &str,
