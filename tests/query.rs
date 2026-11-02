@@ -44,6 +44,11 @@ impl LlmClient for MetaIntentLlm {
                     .to_string(),
             );
         }
+        // MOOSE's controlled-English rewrite (since its CNL NLQ work) asks for the
+        // question as one controlled-English sentence, as a model would give it.
+        if prompt.contains("You rewrite one English question") {
+            return Ok("List architectural decisions.".to_string());
+        }
 
         Ok(r#"{"summary":"synthetic answer","relevant_iris":[],"confidence":"high","unanswered_aspects":[]}"#.to_string())
     }
@@ -172,9 +177,14 @@ async fn query_does_not_surface_schema_spec_internal_error_for_project_records()
         "internal schema contract violation leaked to query answer:\n{}",
         result.answer
     );
+    // Since MOOSE's controlled-English question rewrite, this question is read as a
+    // list query before any intent classification, so it no longer reaches the
+    // schema contract and the PureSymbolic retry in graph/query.rs does not fire.
+    // The retry stays for any route that still raises the contract error; here the
+    // query must simply run at the configured level without the leak above.
     assert!(
-        result.trace.contains("assist level: PureSymbolic"),
-        "schema-contract fallback should retry symbolically; trace:\n{}",
+        result.trace.contains("assist level: Sensor"),
+        "query should run at the configured assist level; trace:\n{}",
         result.trace
     );
 
