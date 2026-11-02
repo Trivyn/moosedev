@@ -30,6 +30,7 @@ use oxigraph::store::Store;
 const SUPERSEDES_LOCAL: &str = "supersedes";
 const STATUS_LOCAL: &str = "hasLifecycleStatus";
 const RETIRED: &[&str] = &["superseded", "deprecated"];
+const PROPOSED: &str = "proposed";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -56,18 +57,31 @@ fn main() -> anyhow::Result<()> {
     };
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
 
-    // Every record claimed as superseded by some other record.
-    let mut claimed = BTreeSet::new();
-    for quad in store
+    // Every record claimed as superseded by some other record. A claim made by a
+    // still-PROPOSED replacement is skipped: that edge is the deferred path's input,
+    // and `accept_proposed_supersession` flips the predecessor when a human ratifies
+    // it. Flipping it here would ratify half a supersession behind their back. The
+    // detector in `src/validation.rs` makes the same exclusion.
+    let all: Vec<Quad> = store
         .quads_for_pattern(None, None, None, Some(graph.into()))
-        .collect::<Result<Vec<_>, _>>()?
-    {
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut claimed = BTreeSet::new();
+    for quad in &all {
         if local_name(quad.predicate.as_str()) != SUPERSEDES_LOCAL {
             continue;
         }
-        if let Term::NamedNode(target) = &quad.object {
-            claimed.insert(target.as_str().to_string());
+        let Term::NamedNode(target) = &quad.object else {
+            continue;
+        };
+        let replacement_proposed = all.iter().any(|q| {
+            q.subject == quad.subject
+                && local_name(q.predicate.as_str()) == STATUS_LOCAL
+                && matches!(&q.object, Term::Literal(lit) if lit.value() == PROPOSED)
+        });
+        if replacement_proposed {
+            continue;
         }
+        claimed.insert(target.as_str().to_string());
     }
 
     let mut changed = 0usize;

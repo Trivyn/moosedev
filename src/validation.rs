@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use moose::shacl::{ShaclReport, ShaclSeverity, ShaclViolation};
-use oxigraph::model::{GraphNameRef, NamedNodeRef, Term, TermRef};
+use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode, Term, TermRef};
 
 use crate::graph::{AppState, PROJECT_KG_GRAPH_IRI};
 use crate::ontology::{
@@ -101,6 +101,30 @@ pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
     })
 }
 
+/// Every `hasLifecycleStatus` literal on `iri`, in the project graph.
+///
+/// A record normally carries one; legacy records carry none, and the callers treat
+/// "no status literal" and "some retired status" alike so the detector and the
+/// repair tool agree.
+fn status_literals(state: &AppState, iri: &str) -> anyhow::Result<Vec<String>> {
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let status_predicate = NamedNodeRef::new(&state.capture.status)?;
+    let subject = NamedNodeRef::new(iri)?;
+    Ok(state
+        .store
+        .quads_for_pattern(
+            Some(subject.into()),
+            Some(status_predicate),
+            None,
+            Some(graph.into()),
+        )
+        .filter_map(|quad| match quad.ok()?.object {
+            Term::Literal(literal) => Some(literal.value().to_string()),
+            _ => None,
+        })
+        .collect())
+}
+
 /// Records retired by a `supersedes` edge whose lifecycle status was never flipped.
 ///
 /// A record that is the object of `supersedes` must carry `hasLifecycleStatus
@@ -126,12 +150,18 @@ pub fn validate_project(state: &AppState) -> anyhow::Result<ValidationReport> {
 /// can express this — which is the only reason the check lives in Rust. When that
 /// support lands, move the rule into the shapes TTL and delete this.
 ///
+/// A PROPOSED replacement is excluded: its `supersedes` edge is the deferred path's
+/// input, ratified later by `accept_proposed_supersession`, and until then the
+/// predecessor is correctly still current. This mirrors `guard_supersession_edge`,
+/// which admits an edge on exactly that subject — without the exclusion the check
+/// fires on the one workflow the guard exists to preserve.
+///
 /// Semantics match `examples/repair_unflipped_supersessions.rs` exactly, including
-/// skipping a record with no status literal at all, so the detector and the repair can
-/// never disagree about what counts as drift.
+/// skipping a record with no status literal at all and skipping proposed
+/// replacements, so the detector and the repair can never disagree about what
+/// counts as drift.
 fn unflipped_supersessions(state: &AppState) -> anyhow::Result<Vec<Violation>> {
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let status_predicate = NamedNodeRef::new(&state.capture.status)?;
 
     // Match the predicate by LOCAL NAME, never a hardcoded namespace (Constraint
     // 19bb4d8a) — the ontology namespace is volatile and has moved before.
@@ -144,27 +174,23 @@ fn unflipped_supersessions(state: &AppState) -> anyhow::Result<Vec<Violation>> {
         if crate::graph::util::local_name(quad.predicate.as_str()) != "supersedes" {
             continue;
         }
-        if let Term::NamedNode(target) = &quad.object {
-            retired_by_edge.insert(target.as_str().to_string());
+        let Term::NamedNode(target) = &quad.object else {
+            continue;
+        };
+        if let NamedOrBlankNode::NamedNode(replacement) = &quad.subject {
+            if status_literals(state, replacement.as_str())?
+                .iter()
+                .any(|status| crate::graph::lifecycle::is_proposed(status))
+            {
+                continue;
+            }
         }
+        retired_by_edge.insert(target.as_str().to_string());
     }
 
     let mut violations = Vec::new();
     for iri in retired_by_edge {
-        let subject = NamedNodeRef::new(&iri)?;
-        let statuses: Vec<String> = state
-            .store
-            .quads_for_pattern(
-                Some(subject.into()),
-                Some(status_predicate),
-                None,
-                Some(graph.into()),
-            )
-            .filter_map(|quad| match quad.ok()?.object {
-                Term::Literal(literal) => Some(literal.value().to_string()),
-                _ => None,
-            })
-            .collect();
+        let statuses = status_literals(state, &iri)?;
         if statuses.is_empty()
             || statuses
                 .iter()
