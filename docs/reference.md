@@ -17,7 +17,7 @@ dumping project history into the model context.
 | `get_relevant_context` | Retrieve current project knowledge by topic, or omit the topic for a broad inventory. History is opt-in. |
 | `query` | Ask one focused natural-language question and receive an answer with a symbolic reasoning trace. |
 | `sparql` | Run a read-only SPARQL query. `SELECT` and `ASK` return JSON; `CONSTRUCT` and `DESCRIBE` return N-Triples. |
-| `get_entity_dossier` | Retrieve the decisions, constraints, lessons, judgments, and observations that govern one code entity. |
+| `get_entity_dossier` | Retrieve the decisions, constraints, lessons, judgments, and observations that govern one code entity. Directly linked records carry their complete claims; component records are listed by title. |
 | `get_provenance` | Find which agent recorded an item and when. |
 
 For ordinary recall, start with `get_relevant_context`, move to `query` when
@@ -44,7 +44,7 @@ duplicates or delete historical knowledge.
 | `align_concepts` | Align a new term to the best matching ontology class, with the deciding sensor and rationale. |
 | `suggest_mappings` | Return ranked ontology-class candidates for human review. |
 | `suggest_links` | Suggest ontology-legal relationships between records. Suggestions are not written automatically. |
-| `evaluate_policy` | Evaluate a host event through the shared symbolic push, gate, and capture policy. |
+| `evaluate_policy` | Evaluate a host event through the shared symbolic push, gate, and capture policy. An `entity_touched` push accepts `max_bytes`: the first entity section is always whole, and a later section that does not fit is shortened, never omitted, to its direct records with their claims and its component's accepted Constraint titles; a closing line names the shortened entities. Because that core always renders, the result can exceed the bound, so hosts with a hard cap cut at a line boundary and append an explicit truncation notice. |
 | `capture_decision_point` | Create a grounded proposed decision and queue its code links for review. |
 | `pending_ratifications` | List proposed records and links waiting for human review. |
 | `validate_against_architecture` | Validate recorded knowledge against the architecture SHACL shapes. |

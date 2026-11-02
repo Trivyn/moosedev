@@ -264,17 +264,62 @@ pub fn render_markdown(dossier: &Dossier) -> String {
 /// showed renders its header and points back, and a component's records are
 /// listed once, at the first entity that realizes it.
 pub fn render_dossiers(dossiers: &[Dossier]) -> String {
+    render_dossiers_within(dossiers, None)
+}
+
+/// [`render_dossiers`] within a host byte bound. Sections render whole while the
+/// running text fits `max_bytes`, and the first always renders whole. A section
+/// that does not fit keeps what a bound never omits: its heading, its direct
+/// records with their claims, and its component's accepted Constraint titles.
+/// A closing line names the shortened entities. That core always renders, so
+/// the result can exceed the bound; `None` renders every section whole.
+pub(crate) fn render_dossiers_within(dossiers: &[Dossier], max_bytes: Option<usize>) -> String {
     let mut shown = ShownInPush::default();
-    dossiers
-        .iter()
-        .map(|dossier| {
-            render_dossier_markdown_with_records(
+    let mut out = String::new();
+    let mut shortened = Vec::new();
+    for dossier in dossiers {
+        let separator = if out.is_empty() { "" } else { "\n" };
+        let mut whole_shown = shown.clone();
+        let whole = render_dossier_markdown_with_records(
+            dossier,
+            DossierRecordRendering::Exhaustive {
+                shown: &mut whole_shown,
+                core_only: false,
+            },
+        );
+        let fits = out.is_empty()
+            || max_bytes.is_none_or(|max| out.len() + separator.len() + whole.len() <= max);
+        out.push_str(separator);
+        if fits {
+            shown = whole_shown;
+            out.push_str(&whole);
+        } else {
+            let core = render_dossier_markdown_with_records(
                 dossier,
-                DossierRecordRendering::Exhaustive(&mut shown),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+                DossierRecordRendering::Exhaustive {
+                    shown: &mut shown,
+                    core_only: true,
+                },
+            );
+            if core != whole {
+                shortened.push(format!("`{}`", dossier.display_name));
+            }
+            out.push_str(&core);
+        }
+    }
+    if let (Some(max), false) = (max_bytes, shortened.is_empty()) {
+        let (sections, pronoun) = if shortened.len() == 1 {
+            ("section", "it")
+        } else {
+            ("sections", "them")
+        };
+        out.push_str(&format!(
+            "\n{} entity {sections} shortened to direct records and accepted Constraints by the host's {max}-byte bound: {}; retrieve {pronoun} in full with get_entity_dossier\n",
+            shortened.len(),
+            shortened.join(", ")
+        ));
+    }
+    out
 }
 
 /// Render the editor-hover view with optional Story deep links for the exact
@@ -300,14 +345,19 @@ pub fn render_dossier_markdown(
 
 /// What earlier sections of one push rendered: claim and component IRIs, each
 /// mapped to the display name of the entity whose section showed it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ShownInPush {
     claims: BTreeMap<String, String>,
     components: BTreeMap<String, String>,
 }
 
 enum DossierRecordRendering<'a> {
-    Exhaustive(&'a mut ShownInPush),
+    /// `core_only` keeps just what a byte bound never omits: the heading,
+    /// direct records with their claims, and accepted Constraint titles.
+    Exhaustive {
+        shown: &'a mut ShownInPush,
+        core_only: bool,
+    },
     Hover {
         entity_story_url: Option<&'a str>,
         component_story_url: Option<&'a str>,
@@ -318,6 +368,13 @@ fn render_dossier_markdown_with_records(
     dossier: &Dossier,
     mut record_rendering: DossierRecordRendering<'_>,
 ) -> String {
+    let core_only = matches!(
+        record_rendering,
+        DossierRecordRendering::Exhaustive {
+            core_only: true,
+            ..
+        }
+    );
     let marker = if dossier.syntactic_anchor {
         " [syntactic anchor]"
     } else {
@@ -348,7 +405,7 @@ fn render_dossier_markdown_with_records(
         out.push_str(&format!("\n[Tell me the Story]({url})\n"));
     }
 
-    if !dossier.judgments.is_empty() {
+    if !dossier.judgments.is_empty() && !core_only {
         out.push_str("\n**Judgments**\n");
         for judgment in &dossier.judgments {
             render_judgment_line(&mut out, judgment);
@@ -369,7 +426,7 @@ fn render_dossier_markdown_with_records(
 
     if !dossier.direct_records.is_empty() {
         match &mut record_rendering {
-            DossierRecordRendering::Exhaustive(shown) => {
+            DossierRecordRendering::Exhaustive { shown, .. } => {
                 out.push_str("\n**Records**\n");
                 for record in &dossier.direct_records {
                     render_record_line(&mut out, record);
@@ -387,7 +444,7 @@ fn render_dossier_markdown_with_records(
     if let Some((component_iri, label)) = &dossier.realizes {
         if !dossier.component_records.is_empty() {
             match &mut record_rendering {
-                DossierRecordRendering::Exhaustive(shown) => {
+                DossierRecordRendering::Exhaustive { shown, .. } => {
                     if let Some(first) = shown.components.get(component_iri) {
                         out.push_str(&format!(
                             "\n**Via component {label}**: listed above for `{first}`\n"
@@ -397,7 +454,13 @@ fn render_dossier_markdown_with_records(
                             .components
                             .insert(component_iri.clone(), dossier.display_name.clone());
                         out.push_str(&format!("\n**Via component {label}**\n"));
-                        render_component_record_titles(&mut out, label, &dossier.component_records);
+                        let limit = if core_only { 0 } else { COMPONENT_TITLE_LIMIT };
+                        render_component_record_titles(
+                            &mut out,
+                            label,
+                            &dossier.component_records,
+                            limit,
+                        );
                     }
                 }
                 DossierRecordRendering::Hover {
@@ -413,7 +476,7 @@ fn render_dossier_markdown_with_records(
             }
         }
     }
-    if !dossier.observations.is_empty() {
+    if !dossier.observations.is_empty() && !core_only {
         out.push_str("\n**Observations**\n");
         for observation in &dossier.observations {
             out.push_str(&format!("- {observation}\n"));
@@ -453,15 +516,20 @@ fn render_record_claim(
 const COMPONENT_TITLE_LIMIT: usize = 12;
 
 /// Exhaustive component context: title lines only. Accepted Constraints are
-/// always listed, other records up to [`COMPONENT_TITLE_LIMIT`] in dossier
-/// order, then one line counts the rest by kind.
-fn render_component_record_titles(out: &mut String, label: &str, records: &[RecordSummary]) {
+/// always listed, other records up to `limit` in dossier order, then one line
+/// counts the rest by kind.
+fn render_component_record_titles(
+    out: &mut String,
+    label: &str,
+    records: &[RecordSummary],
+    limit: usize,
+) {
     let mut listed = 0;
     let mut omitted = Vec::new();
     for record in records {
         let accepted_constraint =
             record.kind == "Constraint" && record.status.eq_ignore_ascii_case("accepted");
-        if accepted_constraint || listed < COMPONENT_TITLE_LIMIT {
+        if accepted_constraint || listed < limit {
             listed += usize::from(!accepted_constraint);
             render_record_line(out, record);
         } else {

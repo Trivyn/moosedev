@@ -254,11 +254,12 @@ async fn one_policy_drives_both_hosts() {
         .unwrap()
         .contains("alpha is contract-bound"));
 
-    // PUSH: the injected dossier bytes equal what the hover tool renders.
+    // PUSH: the injected dossier bytes equal what the dossier tool renders; a
+    // host byte bound never drops the first (here only) entity section.
     let push = call_raw(
         &client,
         "evaluate_policy",
-        json!({"host": "opencode", "event": "entity_touched", "file": FILE, "line": 2, "col": 1}),
+        json!({"host": "opencode", "event": "entity_touched", "file": FILE, "line": 2, "col": 1, "max_bytes": 1}),
     )
     .await;
     let push_verdict: Value = serde_json::from_str(response_text(&push)).unwrap();

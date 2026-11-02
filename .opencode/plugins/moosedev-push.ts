@@ -9,7 +9,7 @@ import { createInterface } from "node:readline"
 // the MOOSEDev daemon's policy engine (`evaluate_policy` over `moosedev
 // --connect`), and enacts the typed verdict it gets back:
 //   - PUSH   entity_touched on the session's working set → inject the returned
-//            dossier markdown (the same bytes the editor hover shows).
+//            dossier markdown, bounded by the block's remaining budget.
 //   - GATE   edit_proposed before Edit/Write/Patch tools → deny blocks the
 //            tool call; require_ratification asks via the permission prompt,
 //            degrading to a warning note when no prompt fires (spec §4.1:
@@ -94,6 +94,7 @@ const MAX_BLOCK_CHARS = 6_000
 const REQUEST_TIMEOUT_MS = 5_000
 const CAPTURE_MIN_INTERVAL_MS = 10 * 60_000
 const BLOCK_HEADER = "## Relevant recorded project knowledge (MOOSEDev)"
+const TRUNCATION_NOTICE = "[truncated by hook cap; call get_entity_dossier for the full dossier]"
 const GATE_HEADER = "## MOOSEDev gate notices"
 const HOST = "opencode"
 const PATH_ARG_KEYS = [
@@ -188,13 +189,17 @@ export async function MooseDevPush(input: PluginInput) {
     const sections: string[] = []
     const seenEntities = new Set<string>()
     for (const file of paths) {
-      const verdict = await evaluatePolicy({ event: "entity_touched", file })
+      // The engine bounds each dossier by the budget left in the block, at
+      // entity-section boundaries; capBlock below is the last resort.
+      const used = sections.join("\n\n").length + (sections.length > 0 ? 2 : 0)
+      const remaining = MAX_BLOCK_CHARS - used
+      if (remaining <= 0) break
+      const verdict = await evaluatePolicy({ event: "entity_touched", file, max_bytes: remaining })
       if (!verdict || verdict.decision !== "inject" || !verdict.dossier_markdown) continue
       const entities = verdict.entities || []
       if (entities.length > 0 && entities.every((e) => seenEntities.has(e))) continue
       for (const entity of entities) seenEntities.add(entity)
       sections.push(verdict.dossier_markdown)
-      if (sections.join("\n").length > MAX_BLOCK_CHARS) break
     }
 
     const parts: string[] = []
@@ -651,8 +656,10 @@ function shorten(text: string, max = 240): string {
   return `${clean.slice(0, Math.max(0, max - 3)).trimEnd()}...`
 }
 
-/// Cap a multi-line markdown block without collapsing its newlines.
+/// Cap a multi-line markdown block at a line boundary, ending with a notice
+/// that says it was cut.
 function capBlock(text: string, max: number): string {
   if (text.length <= max) return text
-  return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`
+  const cut = text.lastIndexOf("\n", max - TRUNCATION_NOTICE.length - 1)
+  return `${cut > 0 ? text.slice(0, cut) : ""}\n${TRUNCATION_NOTICE}`
 }

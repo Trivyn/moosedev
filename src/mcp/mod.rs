@@ -651,6 +651,10 @@ pub struct EvaluatePolicyArgs {
     /// Optional edit-text anchor (e.g. an Edit tool's old_string), located in
     /// the on-disk file to scope an `edit_proposed` gate to overlapping definitions.
     pub anchor: Option<String>,
+    /// Optional byte bound for an `entity_touched` push: entity sections past it
+    /// keep only their direct records, claims and accepted Constraint titles.
+    #[schemars(range(min = 1))]
+    pub max_bytes: Option<usize>,
     /// Changed files for a `decision_point` event.
     pub files: Option<Vec<String>>,
     /// Host-provided summary text for a `decision_point` event.
@@ -832,6 +836,7 @@ impl MooseDevServer {
                     file,
                     line: args.line,
                     col: args.col,
+                    max_bytes: args.max_bytes,
                 }
             }
             "edit_proposed" => {
@@ -2564,7 +2569,7 @@ mod tests {
             policy["properties"]["event"]["enum"],
             serde_json::json!(["entity_touched", "edit_proposed", "decision_point"])
         );
-        for field in ["line", "col"] {
+        for field in ["line", "col", "max_bytes"] {
             assert_eq!(policy["properties"][field]["minimum"], 1);
         }
 
