@@ -247,6 +247,7 @@ environment values take precedence. A project root contains `.git`,
 | `MOOSEDEV_SOCKET` | Override the Unix socket used by `--serve` and `--connect`. |
 | `MOOSEDEV_HTTP_ADDR` | Set the workbench bind address. The default is `127.0.0.1:0`. |
 | `MOOSEDEV_NO_HTTP` | Disable the web workbench when truthy. |
+| `MOOSEDEV_ALLOWED_ORIGINS` | Comma-separated extra browser origins (`http(s)://host[:port]`, e.g. `http://localhost:5173`) allowed to call the HTTP API cross-origin. Unset by default: only same-origin pages are served. |
 | `MOOSEDEV_NO_LSP` | Disable the daemon's Knowledge-LSP endpoint when truthy. |
 | `MOOSEDEV_NO_AUTOSPAWN` | Prevent `--connect` and `ui` from starting a daemon automatically. |
 | `MOOSEDEV_ONTOLOGY_DIR` | Use a custom ontology directory. Release bundles normally find their colocated `ontologies/` directory automatically. |
@@ -263,3 +264,11 @@ environment values take precedence. A project root contains `.git`,
 
 Setting `MOOSEDEV_HTTP_ADDR` to a non-loopback interface exposes the workbench
 to the network. Do so only when that access is intentional.
+
+Every HTTP request passes an Origin/Host guard. The `Host` must be an IP
+address or `localhost`, so a DNS-rebound hostname is refused (a daemon bound to
+a network interface is reached by its IP, not by name). A browser `Origin`
+must match the daemon's own address or appear in `MOOSEDEV_ALLOWED_ORIGINS`,
+and an Origin-less request that a browser marks as cross-site
+(`Sec-Fetch-Site`) is refused. Native clients that send no `Origin` are
+unaffected. Refusals answer `403`.
