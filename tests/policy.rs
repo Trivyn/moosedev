@@ -377,7 +377,7 @@ fn push_injects_hover_bytes_and_fires() {
         .unwrap()
         .expect("dossier exists"),
     );
-    assert_eq!(dossier_markdown, hover, "push == hover bytes");
+    assert_eq!(dossier_markdown, hover, "push == MCP dossier bytes");
     assert_eq!(entities, vec![f.alpha.clone()]);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].iri, f.constraint);
@@ -428,6 +428,46 @@ fn file_touch_pushes_all_knowledge_bearing_entities() {
     assert_eq!(entities.len(), 2, "both entities pushed");
     assert!(dossier_markdown.contains("must stay pure"));
     assert!(dossier_markdown.contains("beta gotcha"));
+}
+
+#[test]
+fn file_touch_shows_a_shared_record_claim_once() {
+    let f = setup("policy-file-dedup");
+    insert_quad(
+        &f.state,
+        &f.constraint,
+        &f.state.capture.description,
+        Literal::new_simple_literal("Pure functions only.").into(),
+    );
+    graph::relate(&f.state, &f.constraint, "constrains", &f.alpha).expect("constrains alpha");
+    graph::relate(&f.state, &f.constraint, "constrains", &f.beta).expect("constrains beta");
+
+    let event = PolicyEvent::EntityTouched {
+        file: FILE.to_string(),
+        line: None,
+        col: None,
+    };
+    let decision = evaluate(&f.state, &f.repo_root, &event).expect("evaluate");
+    let PolicyDecision::Inject {
+        dossier_markdown,
+        entities,
+        ..
+    } = decision
+    else {
+        panic!("expected an inject");
+    };
+    assert_eq!(entities.len(), 2, "both entities pushed");
+    assert_eq!(
+        dossier_markdown
+            .matches("hasDescription: Pure functions only.")
+            .count(),
+        1,
+        "{dossier_markdown}"
+    );
+    assert!(
+        dossier_markdown.contains("\nclaim shown above for `alpha`\n"),
+        "{dossier_markdown}"
+    );
 }
 
 #[test]

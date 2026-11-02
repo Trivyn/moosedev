@@ -152,6 +152,17 @@ fn constrained_state(data_dir: &Path) -> AppState {
         .expect("alpha minted")
         .clone();
     let constraint = record(&state, "Constraint", "alpha is contract-bound", "accepted");
+    let description = Quad::new(
+        NamedNode::new(&constraint).unwrap(),
+        NamedNode::new(&state.capture.description).unwrap(),
+        Term::from(Literal::new_simple_literal(
+            "alpha keeps its signature for external callers.",
+        )),
+        oxigraph::model::GraphName::NamedNode(NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap()),
+    );
+    let mut txn = state.store.start_transaction().unwrap();
+    txn.insert(description.as_ref());
+    txn.commit().unwrap();
     graph::relate(&state, &constraint, "constrains", &alpha).expect("constrains edge");
     state
 }
@@ -263,6 +274,10 @@ async fn one_policy_drives_both_hosts() {
         response_text(&hover),
         "push injects the same dossier bytes hover shows"
     );
+    assert!(push_verdict["dossier_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("hasDescription: alpha keeps its signature for external callers.\n"));
 
     // CAPTURE: proposed only, with provenance, never auto-accepted.
     let capture = call_raw(

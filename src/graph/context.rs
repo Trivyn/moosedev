@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use moose::embeddings::retrieval_embed_query;
 use moose::entity_index::DEFAULT_DENSE_FLOOR;
-use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
+use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
 use super::capture::{
@@ -843,6 +843,69 @@ fn build_context_item(
     }
 }
 
+/// The claim item for one record IRI, built exactly as topic recall builds it
+/// (rationale text inlined). `None` for an untyped or invalid subject.
+pub(crate) fn context_item_for_iri(
+    state: &AppState,
+    iri: &str,
+    include_history: bool,
+) -> Option<ContextItem> {
+    let subject = NamedNode::new(iri).ok()?;
+    let class_iri = asserted_project_types(state, &subject).into_iter().next()?;
+    Some(build_context_item(
+        state,
+        iri.to_string(),
+        class_iri,
+        include_history,
+    ))
+}
+
+/// Literal properties that identify or stamp a record rather than state its claim.
+const NON_CLAIM_LITERALS: &[&str] = &[
+    "hasTitle",
+    "label",
+    "hasTimestamp",
+    "hasAuthor",
+    "hasLifecycleStatus",
+];
+
+/// Links rendered per claim before an omission line.
+const CLAIM_LINK_LIMIT: usize = 6;
+
+/// Render a record's claim body: every literal that states the claim
+/// (description, inlined rationale, other prose), then up to six links in
+/// edge-priority order and an omission line naming how many more exist.
+///
+/// Topic evidence and claim-bearing dossiers both render through this, so a
+/// claim reads the same wherever the harness or an agent receives it.
+pub(crate) fn render_claim_body(item: &ContextItem, out: &mut String) {
+    for property in item.properties.iter().filter(|property| {
+        property.is_literal && !NON_CLAIM_LITERALS.contains(&property.predicate.as_str())
+    }) {
+        out.push_str(&format!("{}: {}\n", property.predicate, property.value));
+    }
+    let mut links: Vec<_> = item
+        .properties
+        .iter()
+        .filter(|property| !property.is_literal)
+        .collect();
+    links.sort_by(|a, b| {
+        edge_priority(&a.predicate)
+            .cmp(&edge_priority(&b.predicate))
+            .then_with(|| a.predicate.cmp(&b.predicate))
+            .then_with(|| a.value.cmp(&b.value))
+    });
+    for link in links.iter().take(CLAIM_LINK_LIMIT) {
+        out.push_str(&format!("{}: {}\n", link.predicate, link.value));
+    }
+    if links.len() > CLAIM_LINK_LIMIT {
+        out.push_str(&format!(
+            "{} further relationships omitted; retrieve them if relevant.\n",
+            links.len() - CLAIM_LINK_LIMIT
+        ));
+    }
+}
+
 /// First literal object of `(subject, predicate, *)` in the project graph, if any.
 pub(crate) fn first_literal(
     store: &Store,
@@ -864,4 +927,52 @@ pub(crate) fn first_literal(
             Term::Literal(l) => Some(l.value().to_string()),
             _ => None,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_claim_body, ContextItem, ContextProperty};
+
+    #[test]
+    fn claim_body_renders_literals_then_six_priority_links() {
+        let mut properties = vec![
+            ContextProperty::literal("hasTitle", "Hidden title"),
+            ContextProperty::literal("hasTimestamp", "2026-09-13T00:00:00Z"),
+            ContextProperty::literal("hasAuthor", "tester"),
+            ContextProperty::literal("hasLifecycleStatus", "accepted"),
+            ContextProperty::literal("hasDescription", "The rule and its reason."),
+            ContextProperty::literal("rationale", "Why it holds."),
+        ];
+        for (predicate, value) in [
+            ("weighs", "urn:w"),
+            ("zeta", "urn:z"),
+            ("concerns", "urn:c"),
+            ("isMotivatedBy", "urn:m"),
+            ("alpha", "urn:a"),
+            ("constrains", "urn:k"),
+            ("resultsIn", "urn:r"),
+        ] {
+            properties.push(ContextProperty::link(predicate, value));
+        }
+        let item = ContextItem {
+            iri: "urn:record".into(),
+            kind: "Constraint".into(),
+            label: "Record".into(),
+            properties,
+        };
+        let mut out = String::new();
+        render_claim_body(&item, &mut out);
+        assert_eq!(
+            out,
+            "hasDescription: The rule and its reason.\n\
+             rationale: Why it holds.\n\
+             concerns: urn:c\n\
+             constrains: urn:k\n\
+             isMotivatedBy: urn:m\n\
+             resultsIn: urn:r\n\
+             weighs: urn:w\n\
+             alpha: urn:a\n\
+             1 further relationships omitted; retrieve them if relevant.\n"
+        );
+    }
 }

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::graph::{
     direct_records_for_entity, entities_by_symbol, first_literal, get_entity_dossier, local_name,
-    render_markdown, resolve_target_entity, AppState, CodeTerms, DossierTarget, RecordSummary,
+    render_dossiers, resolve_target_entity, AppState, CodeTerms, DossierTarget, RecordSummary,
 };
 
 use fires::{append_fire_best_effort, FireEvent};
@@ -114,9 +114,10 @@ pub struct CaptureSpec {
 pub enum PolicyDecision {
     /// Nothing to do — silence is the default (no fire is logged).
     Allow,
-    /// PUSH: inject this dossier markdown. The bytes are produced by the same
-    /// `get_entity_dossier` + `render_markdown` path hover uses, so push and
-    /// hover show identical content by construction.
+    /// PUSH: inject this dossier markdown. The bytes are the exhaustive render
+    /// (`get_entity_dossier` + `render_dossiers`) the MCP `get_entity_dossier`
+    /// tool returns for one entity, so push and that tool agree by construction.
+    /// Editor hover renders its own compact view.
     Inject {
         dossier_markdown: String,
         entities: Vec<String>,
@@ -235,26 +236,22 @@ fn push_decision(
             .collect(),
     };
 
-    let mut sections = Vec::new();
-    let mut entities = Vec::new();
-    let mut records = Vec::new();
+    let mut dossiers = Vec::new();
     for target in &targets {
-        let Some(dossier) = get_entity_dossier(state, target)? else {
-            continue;
-        };
-        sections.push(render_markdown(&dossier));
-        for record in &dossier.direct_records {
-            records.push(record_ref(record));
+        if let Some(dossier) = get_entity_dossier(state, target)? {
+            dossiers.push(dossier);
         }
-        entities.push(dossier.entity_iri);
     }
-    if sections.is_empty() {
+    if dossiers.is_empty() {
         return Ok(PolicyDecision::Allow);
     }
     Ok(PolicyDecision::Inject {
-        dossier_markdown: sections.join("\n"),
-        entities,
-        records,
+        dossier_markdown: render_dossiers(&dossiers),
+        entities: dossiers.iter().map(|d| d.entity_iri.clone()).collect(),
+        records: dossiers
+            .iter()
+            .flat_map(|d| d.direct_records.iter().map(record_ref))
+            .collect(),
     })
 }
 

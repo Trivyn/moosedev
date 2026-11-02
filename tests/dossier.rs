@@ -876,3 +876,283 @@ fn meta() -> SubstrateMeta {
         4,
     )
 }
+
+/// Exhaustive dossiers carry each working-set direct record's claim body,
+/// unindented under its header so the claim text reads verbatim.
+#[test]
+fn exhaustive_dossier_carries_direct_claims_unindented() {
+    let state = state_with_substrate("direct-claims");
+    let constraint = record_with_description(
+        &state,
+        "Constraint",
+        "Runtime builder constraint",
+        Some("Bind the listener before serving requests."),
+    );
+    let entity = link_public(&state, &constraint, "constrains");
+
+    let dossier = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("dossier");
+    let timestamp = &dossier.direct_records[0].timestamp;
+    let markdown = graph::render_markdown(&dossier);
+
+    assert!(
+        markdown.contains(&format!(
+            "\n**Records**\n- [Constraint] Runtime builder constraint - accepted, {timestamp} (via constrains)\nhasDescription: Bind the listener before serving requests.\nconstrains: {entity}\n"
+        )),
+        "{markdown}"
+    );
+}
+
+/// A superseded direct record renders header-only, while its linked successor
+/// carries its claim with the inlined rationale text.
+#[test]
+fn superseded_direct_record_is_header_only_and_successor_claims_its_rationale() {
+    let state = state_with_substrate("superseded-claims");
+    let superseded = record_with_description(
+        &state,
+        "ArchitecturalDecision",
+        "Superseded entity decision",
+        Some("Old claim text."),
+    );
+    link_public(&state, &superseded, "concerns");
+    let successor = graph::supersede_decision(
+        &state,
+        &SupersedeInput {
+            superseded_iri: superseded.clone(),
+            new: RecordInput {
+                class_iri: String::new(),
+                class_local: String::new(),
+                properties: vec![
+                    (
+                        moose::RDFS_LABEL.to_string(),
+                        "Successor decision".to_string(),
+                    ),
+                    (
+                        state.capture.title.clone(),
+                        "Successor decision".to_string(),
+                    ),
+                    (
+                        state.capture.description.clone(),
+                        "New claim text.".to_string(),
+                    ),
+                ],
+            },
+            rationale: "changed".to_string(),
+        },
+        "tester",
+        Utc::now(),
+    )
+    .unwrap()
+    .new_iri;
+    link_public(&state, &successor, "concerns");
+
+    let dossier = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("dossier");
+    let markdown = graph::render_markdown(&dossier);
+    let old = dossier
+        .direct_records
+        .iter()
+        .find(|record| record.iri == superseded)
+        .expect("superseded record stays visible");
+
+    assert!(
+        markdown.contains("hasDescription: New claim text.\n"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("rationale: changed\n"), "{markdown}");
+    assert!(!markdown.contains("Old claim text."), "{markdown}");
+    let header = format!(
+        "- [ArchitecturalDecision] Superseded entity decision - superseded, {} (via concerns)\n",
+        old.timestamp
+    );
+    let after = &markdown[markdown.find(&header).expect("superseded header") + header.len()..];
+    assert!(
+        after.is_empty() || after.starts_with("- [") || after.starts_with('\n'),
+        "superseded record is header-only: {markdown}"
+    );
+}
+
+/// Component records render as title lines only: accepted Constraints always,
+/// other kinds up to twelve, then one line counting what was left out.
+#[test]
+fn component_titles_cap_other_kinds_and_keep_accepted_constraints() {
+    let state = state_with_substrate("component-cap");
+    let entity_iri = pre_mint_public(&state);
+    let component_iri = graph::load_components(&state).unwrap()[0]
+        .iri
+        .clone()
+        .unwrap();
+    let direct = record(&state, "Lesson", "Direct entity lesson");
+    graph::relate(&state, &direct, "concerns", &entity_iri).unwrap();
+    for n in 0..13 {
+        let iri = record_with_description(
+            &state,
+            "Constraint",
+            &format!("Component constraint {n:02}"),
+            Some(&format!("Component constraint claim {n:02}.")),
+        );
+        graph::relate(&state, &iri, "concerns", &component_iri).unwrap();
+    }
+    for n in 0..14 {
+        let iri = record_with_description(
+            &state,
+            "ArchitecturalDecision",
+            &format!("Component decision {n:02}"),
+            Some(&format!("Component decision claim {n:02}.")),
+        );
+        graph::relate(&state, &iri, "concerns", &component_iri).unwrap();
+    }
+
+    let dossier = graph::get_entity_dossier(&state, &DossierTarget::Iri(entity_iri))
+        .unwrap()
+        .expect("dossier");
+    let markdown = graph::render_markdown(&dossier);
+
+    assert_eq!(
+        markdown
+            .matches("- [ArchitecturalDecision] Component decision ")
+            .count(),
+        12,
+        "{markdown}"
+    );
+    assert_eq!(
+        markdown
+            .matches("- [Constraint] Component constraint ")
+            .count(),
+        13,
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("\n2 further records concern component runtime component (ArchitecturalDecision: 2), not necessarily this code; search project knowledge for records about runtime component\n"),
+        "{markdown}"
+    );
+    assert!(
+        !markdown.contains("Component constraint claim"),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("Component decision claim"), "{markdown}");
+}
+
+/// One file's dossiers render each record's claim once and each component's
+/// records once; later mentions point back to where they were shown.
+#[test]
+fn render_dossiers_shows_each_claim_and_component_once() {
+    let state = state_with_substrate("per-file-dedup");
+    let private_position = DossierTarget::Position {
+        file: "src/runtime.rs".to_string(),
+        line: 12,
+        col: 5,
+    };
+    let shared = record_with_description(
+        &state,
+        "Constraint",
+        "Shared runtime constraint",
+        Some("Shared claim text."),
+    );
+    link_public(&state, &shared, "constrains");
+    graph::link_code(
+        &state,
+        &shared,
+        "constrains",
+        &CodeSelector::Position {
+            file: "src/runtime.rs".to_string(),
+            line: 12,
+            col: 5,
+        },
+        "tester",
+    )
+    .expect("link private helper");
+    let component_iri = graph::load_components(&state).unwrap()[0]
+        .iri
+        .clone()
+        .unwrap();
+    let component_record = record(
+        &state,
+        "ArchitecturalDecision",
+        "Component context decision",
+    );
+    graph::relate(&state, &component_record, "concerns", &component_iri).unwrap();
+
+    let public = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("public dossier");
+    let private = graph::get_entity_dossier(&state, &private_position)
+        .unwrap()
+        .expect("private dossier");
+    let markdown = graph::render_dossiers(&[public.clone(), private]);
+
+    assert_eq!(
+        markdown.matches("Component context decision").count(),
+        1,
+        "{markdown}"
+    );
+    assert!(
+        markdown
+            .contains("\n**Via component runtime component**: listed above for `build_server`\n"),
+        "{markdown}"
+    );
+    assert_eq!(
+        markdown
+            .matches("hasDescription: Shared claim text.")
+            .count(),
+        1,
+        "{markdown}"
+    );
+    assert_eq!(
+        markdown
+            .matches("- [Constraint] Shared runtime constraint")
+            .count(),
+        2,
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("\nclaim shown above for `build_server`\n"),
+        "{markdown}"
+    );
+    assert_eq!(
+        graph::render_markdown(&public),
+        graph::render_dossiers(std::slice::from_ref(&public))
+    );
+}
+
+/// Hover keeps its compact bytes: direct titles and component counts, never
+/// claim text.
+#[test]
+fn hover_render_is_byte_stable_and_carries_no_claim() {
+    let state = state_with_substrate("hover-bytes");
+    let constraint = record_with_description(
+        &state,
+        "Constraint",
+        "Hover constraint",
+        Some("Hover claim text."),
+    );
+    link_public(&state, &constraint, "constrains");
+    let component_iri = graph::load_components(&state).unwrap()[0]
+        .iri
+        .clone()
+        .unwrap();
+    let component_record = record_with_description(
+        &state,
+        "ArchitecturalDecision",
+        "Component hover decision",
+        Some("Component hover claim."),
+    );
+    graph::relate(&state, &component_record, "concerns", &component_iri).unwrap();
+
+    let dossier = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("dossier");
+    let hover = graph::render_dossier_markdown(&dossier, None, None);
+
+    assert_eq!(
+        hover,
+        format!(
+            "### build_server (Function)\n`{}` - defined in `src/runtime.rs`\nRealizes component: runtime component\n\n**Direct records**\n- [Constraint] Hover constraint - accepted, {} (via constrains)\n\n**Indirect component context**\n- Total: 1 record that concerns this component, not necessarily this code entity.\n- By kind: ArchitecturalDecision: 1\n",
+            dossier.logical_path.as_deref().expect("logical path"),
+            dossier.direct_records[0].timestamp,
+        )
+    );
+    assert!(!hover.contains("claim"), "{hover}");
+}

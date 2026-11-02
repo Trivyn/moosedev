@@ -14,7 +14,7 @@ use crate::code::substrate::Position;
 
 use super::capture::asserted_project_types;
 use super::code_entities::{entities_by_symbol, CodeTerms};
-use super::context::first_literal;
+use super::context::{context_item_for_iri, first_literal, render_claim_body};
 use super::lifecycle::in_working_set;
 use super::proposals::{judgments_for_entity, JudgmentSummary};
 use super::state::AppState;
@@ -53,6 +53,9 @@ pub struct RecordSummary {
     pub timestamp: String,
     /// Canonical predicate local name, regardless of which direction was asserted.
     pub predicate_local: String,
+    /// Claim body the exhaustive render prints beneath the header: set only for
+    /// working-set direct records, never for superseded history or component records.
+    pub claim: Option<String>,
 }
 
 /// Read model for all project knowledge directly attached to a CodeEntity.
@@ -116,7 +119,7 @@ pub fn get_entity_dossier(
         .is_some_and(|symbol| symbol.starts_with("ts:"));
     let realizes = first_realized_component(state, &terms, &entity_iri)?;
 
-    let direct_records = direct_records_for_entity(state, &entity_iri)?;
+    let mut direct_records = direct_records_for_entity(state, &entity_iri)?;
     // Silence-rule amendment (of AD 8f20452a): judgments count as direct
     // knowledge — a ratified core role with zero records is exactly the
     // hotspot a hover must surface. Observations alone never break silence
@@ -124,6 +127,11 @@ pub fn get_entity_dossier(
     let judgments = judgments_for_entity(state, &entity_iri)?;
     if direct_records.is_empty() && judgments.is_empty() {
         return Ok(None);
+    }
+    for record in &mut direct_records {
+        if in_working_set(&record.status) {
+            record.claim = record_claim(state, &record.iri);
+        }
     }
 
     let pairs = LinkPairs::resolve(state)?;
@@ -245,9 +253,28 @@ pub(crate) fn code_entities_with_records(
     Ok(linked)
 }
 
-/// Render a stable Markdown view suitable for MCP and future hover surfaces.
+/// Render one dossier's exhaustive Markdown view, as MCP `get_entity_dossier`
+/// and policy push serve it.
 pub fn render_markdown(dossier: &Dossier) -> String {
-    render_dossier_markdown_with_records(dossier, DossierRecordRendering::Exhaustive)
+    render_dossiers(std::slice::from_ref(dossier))
+}
+
+/// Render the exhaustive view of one push's dossiers, in order. Working-set
+/// direct records carry their claim bodies; a record an earlier section already
+/// showed renders its header and points back, and a component's records are
+/// listed once, at the first entity that realizes it.
+pub fn render_dossiers(dossiers: &[Dossier]) -> String {
+    let mut shown = ShownInPush::default();
+    dossiers
+        .iter()
+        .map(|dossier| {
+            render_dossier_markdown_with_records(
+                dossier,
+                DossierRecordRendering::Exhaustive(&mut shown),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Render the editor-hover view with optional Story deep links for the exact
@@ -271,9 +298,16 @@ pub fn render_dossier_markdown(
     )
 }
 
-#[derive(Clone, Copy)]
+/// What earlier sections of one push rendered: claim and component IRIs, each
+/// mapped to the display name of the entity whose section showed it.
+#[derive(Default)]
+struct ShownInPush {
+    claims: BTreeMap<String, String>,
+    components: BTreeMap<String, String>,
+}
+
 enum DossierRecordRendering<'a> {
-    Exhaustive,
+    Exhaustive(&'a mut ShownInPush),
     Hover {
         entity_story_url: Option<&'a str>,
         component_story_url: Option<&'a str>,
@@ -282,7 +316,7 @@ enum DossierRecordRendering<'a> {
 
 fn render_dossier_markdown_with_records(
     dossier: &Dossier,
-    record_rendering: DossierRecordRendering<'_>,
+    mut record_rendering: DossierRecordRendering<'_>,
 ) -> String {
     let marker = if dossier.syntactic_anchor {
         " [syntactic anchor]"
@@ -309,7 +343,7 @@ fn render_dossier_markdown_with_records(
     if let DossierRecordRendering::Hover {
         entity_story_url: Some(url),
         ..
-    } = record_rendering
+    } = &record_rendering
     {
         out.push_str(&format!("\n[Tell me the Story]({url})\n"));
     }
@@ -334,22 +368,36 @@ fn render_dossier_markdown_with_records(
     }
 
     if !dossier.direct_records.is_empty() {
-        let heading = match record_rendering {
-            DossierRecordRendering::Exhaustive => "Records",
-            DossierRecordRendering::Hover { .. } => "Direct records",
-        };
-        out.push_str(&format!("\n**{heading}**\n"));
-        for record in &dossier.direct_records {
-            render_record_line(&mut out, record);
+        match &mut record_rendering {
+            DossierRecordRendering::Exhaustive(shown) => {
+                out.push_str("\n**Records**\n");
+                for record in &dossier.direct_records {
+                    render_record_line(&mut out, record);
+                    render_record_claim(&mut out, record, &dossier.display_name, shown);
+                }
+            }
+            DossierRecordRendering::Hover { .. } => {
+                out.push_str("\n**Direct records**\n");
+                for record in &dossier.direct_records {
+                    render_record_line(&mut out, record);
+                }
+            }
         }
     }
-    if let Some((_, label)) = &dossier.realizes {
+    if let Some((component_iri, label)) = &dossier.realizes {
         if !dossier.component_records.is_empty() {
-            match record_rendering {
-                DossierRecordRendering::Exhaustive => {
-                    out.push_str(&format!("\n**Via component {label}**\n"));
-                    for record in &dossier.component_records {
-                        render_record_line(&mut out, record);
+            match &mut record_rendering {
+                DossierRecordRendering::Exhaustive(shown) => {
+                    if let Some(first) = shown.components.get(component_iri) {
+                        out.push_str(&format!(
+                            "\n**Via component {label}**: listed above for `{first}`\n"
+                        ));
+                    } else {
+                        shown
+                            .components
+                            .insert(component_iri.clone(), dossier.display_name.clone());
+                        out.push_str(&format!("\n**Via component {label}**\n"));
+                        render_component_record_titles(&mut out, label, &dossier.component_records);
                     }
                 }
                 DossierRecordRendering::Hover {
@@ -359,7 +407,7 @@ fn render_dossier_markdown_with_records(
                     render_component_record_summary(
                         &mut out,
                         &dossier.component_records,
-                        component_story_url,
+                        *component_story_url,
                     );
                 }
             }
@@ -379,30 +427,85 @@ fn render_dossier_markdown_with_records(
     out
 }
 
+/// A working-set direct record's claim body, unindented beneath its header. A
+/// claim an earlier section of the same push showed points back instead.
+fn render_record_claim(
+    out: &mut String,
+    record: &RecordSummary,
+    entity_name: &str,
+    shown: &mut ShownInPush,
+) {
+    let Some(claim) = &record.claim else {
+        return;
+    };
+    if let Some(first) = shown.claims.get(&record.iri) {
+        out.push_str(&format!("claim shown above for `{first}`\n"));
+    } else {
+        out.push_str(claim);
+        shown
+            .claims
+            .insert(record.iri.clone(), entity_name.to_string());
+    }
+}
+
+/// Component records listed by title before the omission line; accepted
+/// Constraints are listed on top of this.
+const COMPONENT_TITLE_LIMIT: usize = 12;
+
+/// Exhaustive component context: title lines only. Accepted Constraints are
+/// always listed, other records up to [`COMPONENT_TITLE_LIMIT`] in dossier
+/// order, then one line counts the rest by kind.
+fn render_component_record_titles(out: &mut String, label: &str, records: &[RecordSummary]) {
+    let mut listed = 0;
+    let mut omitted = Vec::new();
+    for record in records {
+        let accepted_constraint =
+            record.kind == "Constraint" && record.status.eq_ignore_ascii_case("accepted");
+        if accepted_constraint || listed < COMPONENT_TITLE_LIMIT {
+            listed += usize::from(!accepted_constraint);
+            render_record_line(out, record);
+        } else {
+            omitted.push(record);
+        }
+    }
+    if !omitted.is_empty() {
+        let (noun, verb) = record_noun_verb(omitted.len());
+        out.push_str(&format!(
+            "{} further {noun} {verb} component {label} ({}), not necessarily this code; search project knowledge for records about {label}\n",
+            omitted.len(),
+            kind_counts(omitted.iter().copied())
+        ));
+    }
+}
+
+/// `Kind: n; Kind: n` over records, kinds in name order.
+fn kind_counts<'a>(records: impl IntoIterator<Item = &'a RecordSummary>) -> String {
+    let mut by_kind = BTreeMap::<&str, usize>::new();
+    for record in records {
+        *by_kind.entry(&record.kind).or_default() += 1;
+    }
+    by_kind
+        .into_iter()
+        .map(|(kind, count)| format!("{kind}: {count}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn record_noun_verb(count: usize) -> (&'static str, &'static str) {
+    if count == 1 {
+        ("record", "concerns")
+    } else {
+        ("records", "concern")
+    }
+}
+
 fn render_component_record_summary(
     out: &mut String,
     records: &[RecordSummary],
     component_story_url: Option<&str>,
 ) {
-    let mut by_kind = BTreeMap::<&str, usize>::new();
-    for record in records {
-        *by_kind.entry(&record.kind).or_default() += 1;
-    }
-    let counts = by_kind
-        .into_iter()
-        .map(|(kind, count)| format!("{kind}: {count}"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let noun = if records.len() == 1 {
-        "record"
-    } else {
-        "records"
-    };
-    let verb = if records.len() == 1 {
-        "concerns"
-    } else {
-        "concern"
-    };
+    let counts = kind_counts(records);
+    let (noun, verb) = record_noun_verb(records.len());
 
     out.push_str("\n**Indirect component context**\n");
     out.push_str(&format!(
@@ -708,7 +811,17 @@ fn summarize_record(
         timestamp: first_literal(&state.store, record_iri, &state.capture.timestamp)
             .unwrap_or_default(),
         predicate_local: predicate_local.to_string(),
+        claim: None,
     })
+}
+
+/// The claim body topic recall renders for a record, or `None` when the record
+/// states nothing beyond its title and stamps.
+fn record_claim(state: &AppState, record_iri: &str) -> Option<String> {
+    let item = context_item_for_iri(state, record_iri, false)?;
+    let mut claim = String::new();
+    render_claim_body(&item, &mut claim);
+    (!claim.is_empty()).then_some(claim)
 }
 
 /// Dossier lifecycle policy shared by direct records, inherited component
