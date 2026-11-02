@@ -120,6 +120,10 @@ pub struct AppState {
     /// Ontology embedding vectors (L2 alignment tier); `None` until
     /// `build_alignment_index` runs. Also mirrored into `engine_config`.
     pub vector_store: Option<Arc<VecStore>>,
+    /// The architecture ontology's reasoner oracle (entailed taxonomy, refutation),
+    /// which MOOSE class alignment requires since 0.12. `None` until
+    /// `build_alignment_index` runs, like `vector_store`.
+    pub ontology_oracle: Option<Arc<moose::reasoning::OntologyOracle>>,
     pub engine_config: EngineConfig,
     pub llm: OpenAiCompatClient,
     /// True only when `MOOSEDEV_LLM_BASE_URL` explicitly opts into an LLM provider.
@@ -247,6 +251,9 @@ impl AppState {
             // words / sentence-break = content → demoted out of name-resolution and
             // BM25F boost). Matches the ≤80-char handle convention used for capture.
             label_shape: Default::default(),
+            // No definition predicates: MOOSE's definition-aware vocabulary
+            // extraction stays off, as before moose 0.16.
+            definition_predicates: Vec::new(),
             chat: None,
             discourse: None,
             moose_cache: moose_cache.clone(),
@@ -285,6 +292,7 @@ impl AppState {
             model: llm_cfg.model,
             session_db: None,
             vector_store: None,
+            ontology_oracle: None,
             data_dir: data_dir.to_path_buf(),
             project_root: RwLock::new(initial_project_root(data_dir)),
             story_checks: std::sync::Mutex::new(crate::stories::StoryCheckRegistry::default()),
@@ -641,6 +649,12 @@ impl AppState {
         let vec_store = Arc::new(vec_store);
         self.engine_config.embedding_store = Some(vec_store.clone());
         self.vector_store = Some(vec_store);
+        // Classified once over the graph `arch_vocab` is extracted from, so
+        // alignment's entailed taxonomy and its candidate vocabulary agree.
+        let graph = ontology::ARCH_DOMAIN_GRAPH_IRI;
+        let oracle = moose::reasoning::OntologyOracle::from_graph(&self.store, graph)
+            .map_err(|e| anyhow::anyhow!("ontology oracle over {graph}: {e:?}"))?;
+        self.ontology_oracle = Some(Arc::new(oracle));
         Ok(())
     }
 
