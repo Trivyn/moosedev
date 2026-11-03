@@ -51,7 +51,9 @@ Candidate extensions the generator may add if natural: `Requirement`, `Assumptio
 | `concerns` | ArchitecturalDecision → (SE) Component/System element |
 | `hasRationale` | ArchitecturalDecision → Rationale |
 | `consideredAlternative` | ArchitecturalDecision → Alternative |
-| `supersedes` | ArchitecturalDecision → ArchitecturalDecision |
+| `supersedes` | ArchitecturalDecision → ArchitecturalDecision (subproperty of `prov:wasRevisionOf`) |
+| `restates` | InformationRecord ↔ InformationRecord; symmetric, subproperty of `prov:alternateOf`; asserted by capture reconciliation for reuse-unchanged, with `trivyn:confidence` (added 2026-09-12) |
+| `refines` | InformationRecord → InformationRecord; subproperty of `prov:specializationOf`; a record narrows an existing claim (added 2026-09-12) |
 | `constrains` | Constraint → SE element \| ArchitecturalDecision |
 | `violates` | AntiPattern → Constraint |
 | `mitigates` | ArchitecturalDecision \| Lesson → AntiPattern \| Risk |

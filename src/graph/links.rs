@@ -23,14 +23,17 @@ use super::PROJECT_KG_GRAPH_IRI;
 // retrieval, neighbor, and catalogue primitives.
 // ============================================================================
 
-/// Lifecycle object properties owned by `supersede`/`retract` (and their inverses)
-/// — legal between any record pair, but never *suggested*: they record decision
-/// evolution, not an abductive semantic link.
+/// Lifecycle and reconciliation object properties owned by `supersede`/`retract`
+/// and by capture reconciliation (and their inverses) — legal between any record
+/// pair, but never *suggested*: they record decision evolution or a reuse
+/// disposition, not an abductive semantic link.
 const LIFECYCLE_PREDICATES: &[&str] = &[
     "supersedes",
     "isSupersededBy",
     "hasRationale",
     "isRationaleFor",
+    "restates",
+    "refines",
 ];
 
 /// A candidate link from the suggester: a legal, currently-unasserted edge to a
