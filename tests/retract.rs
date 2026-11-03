@@ -210,3 +210,58 @@ fn read_path_hides_retracted_by_default_and_history_surfaces_rationale() {
         item.properties
     );
 }
+
+#[test]
+fn recall_leaves_out_a_rationale_that_only_explains_retired_records() {
+    let state = bootstrap("rationale-recall");
+    let dc = state.resolve_class("ArchitecturalDecision").unwrap();
+    let retired = record_decision(&state, &dc, "Decision to be retracted");
+    let retraction = graph::retract_decision(
+        &state,
+        &retired,
+        "Withdrawn: the zeppelin cache was never built.",
+        "tester",
+        Utc::now(),
+    )
+    .expect("retract");
+
+    // A supersession's Rationale explains the current replacement, so it stays.
+    let old = record_decision(&state, &dc, "Decision to be replaced");
+    let replaced = graph::supersede_decision(
+        &state,
+        &graph::SupersedeInput {
+            superseded_iri: old,
+            new: RecordInput {
+                class_iri: dc.clone(),
+                class_local: "ArchitecturalDecision".to_string(),
+                properties: vec![
+                    (moose::RDFS_LABEL.to_string(), "Replacement".to_string()),
+                    (state.capture.title.clone(), "Replacement".to_string()),
+                ],
+            },
+            rationale: "Replaced: the zeppelin queue is simpler.".to_string(),
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("supersede");
+
+    let iris = |items: Vec<graph::ContextItem>| -> Vec<String> {
+        items.into_iter().map(|item| item.iri).collect()
+    };
+    let listed = iris(graph::relevant_context(&state, None, 50, false).unwrap());
+    let topical = iris(graph::relevant_context(&state, Some("zeppelin"), 50, false).unwrap());
+    for current in [&listed, &topical] {
+        assert!(
+            !current.contains(&retraction.rationale_iri),
+            "the retraction's Rationale explains only a retired record: {current:?}"
+        );
+        assert!(
+            current.contains(&replaced.rationale_iri),
+            "the supersession's Rationale explains a current record: {current:?}"
+        );
+    }
+
+    let history = iris(graph::relevant_context(&state, Some("zeppelin"), 50, true).unwrap());
+    assert!(history.contains(&retraction.rationale_iri), "{history:?}");
+}
