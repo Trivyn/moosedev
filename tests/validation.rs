@@ -259,3 +259,145 @@ fn insert_iri(state: &AppState, subject_iri: &str, predicate_iri: &str, object_i
         ))
         .unwrap();
 }
+
+/// A `supersedes` edge whose target was never flipped to `superseded` leaves a
+/// replaced record in the working set, so recall returns it as current. SHACL
+/// cannot express this — snarl is SHACL Core, with no `sh:sparql` — so it is
+/// checked in Rust until that support lands. Three live instances existed across
+/// the stores when this was written, two unnoticed for a month.
+#[test]
+fn unflipped_supersession_breaks_conformance() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-validation-unflipped-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let replacement = record_accepted(&state, "The replacement");
+    let predecessor = record_accepted(&state, "The predecessor");
+    assert!(
+        validation::validate_project(&state)
+            .expect("validate")
+            .conforms(),
+        "two ordinary accepted records must conform before the drift is introduced"
+    );
+
+    // Raw insert: the write path now refuses this, which is the point of the guard —
+    // only a pre-existing store (or a direct quad write) can still hold one.
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+    insert_iri(&state, &replacement, &supersedes, &predecessor);
+
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        !report.conforms(),
+        "an unflipped supersession must break conformance:\n{}",
+        validation::format_report(&report)
+    );
+    let drift = report
+        .violations
+        .iter()
+        .find(|v| v.kind == ViolationKind::Other("UnflippedSupersession".to_string()))
+        .expect("the unflipped supersession is reported");
+    assert_eq!(
+        drift.node, predecessor,
+        "the PREDECESSOR is the drifted node"
+    );
+    assert!(
+        drift.detail.contains("repair_unflipped_supersessions"),
+        "the violation names its repair: {}",
+        drift.detail
+    );
+
+    // Flipping the predecessor is exactly what the two supported write paths do.
+    insert_literal(&state, &predecessor, &state.capture.status, "superseded");
+    remove_literal(&state, &predecessor, &state.capture.status, "accepted");
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        report.conforms(),
+        "a flipped supersession conforms again:\n{}",
+        validation::format_report(&report)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A PROPOSED replacement carrying a `supersedes` edge is the deferred
+/// supersession path, not drift: `accept_proposed_supersession` flips the
+/// predecessor when a human ratifies it, and until then the predecessor is
+/// correctly still current. `guard_supersession_edge` admits exactly this edge,
+/// so a detector that flagged it would fire on the one workflow the guard exists
+/// to preserve — which it did, on the first real proposal drafted after #49.
+#[test]
+fn pending_proposed_supersession_still_conforms() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-validation-pending-supersession-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+
+    let predecessor = record_accepted(&state, "The ratified decision");
+    let replacement = record_with_status(&state, "The proposed correction", "proposed");
+
+    // The write path ALLOWS this one — a proposed subject is the deferred path's input.
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+    insert_iri(&state, &replacement, &supersedes, &predecessor);
+
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        report.conforms(),
+        "a pending proposed supersession is not drift:\n{}",
+        validation::format_report(&report)
+    );
+
+    // Ratification is what puts the edge in force; only THEN must the predecessor
+    // have been flipped, and the check goes back to noticing when it was not.
+    insert_literal(&state, &replacement, &state.capture.status, "accepted");
+    remove_literal(&state, &replacement, &state.capture.status, "proposed");
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        !report.conforms(),
+        "once the replacement is accepted the unflipped predecessor is drift again:\n{}",
+        validation::format_report(&report)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn record_accepted(state: &AppState, title: &str) -> String {
+    record_with_status(state, title, "accepted")
+}
+
+fn record_with_status(state: &AppState, title: &str, status: &str) -> String {
+    let class_iri = state.resolve_class("ArchitecturalDecision").unwrap();
+    graph::record_instance(
+        state,
+        &RecordInput {
+            class_iri,
+            class_local: "ArchitecturalDecision".to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (state.capture.status.clone(), status.to_string()),
+            ],
+        },
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("record decision")
+}
+
+fn remove_literal(state: &AppState, subject_iri: &str, predicate_iri: &str, value: &str) {
+    state
+        .store
+        .remove(&Quad::new(
+            NamedNode::new(subject_iri).unwrap(),
+            NamedNode::new(predicate_iri).unwrap(),
+            Literal::new_simple_literal(value),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+        ))
+        .unwrap();
+}

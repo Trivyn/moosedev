@@ -651,6 +651,10 @@ pub struct EvaluatePolicyArgs {
     /// Optional edit-text anchor (e.g. an Edit tool's old_string), located in
     /// the on-disk file to scope an `edit_proposed` gate to overlapping definitions.
     pub anchor: Option<String>,
+    /// Optional byte bound for an `entity_touched` push: entity sections past it
+    /// keep only their direct records, claims and accepted Constraint titles.
+    #[schemars(range(min = 1))]
+    pub max_bytes: Option<usize>,
     /// Changed files for a `decision_point` event.
     pub files: Option<Vec<String>>,
     /// Host-provided summary text for a `decision_point` event.
@@ -719,9 +723,8 @@ pub struct ExportGraphArgs {
 /// The MOOSEDev MCP server: the generated tool router plus shared engine state.
 #[derive(Clone)]
 pub struct MooseDevServer {
-    // Read by the `#[tool_handler]`-generated `ServerHandler` impl; the dead-code
-    // pass doesn't attribute that macro-generated use, so silence the lint.
-    #[allow(dead_code)]
+    /// Served by the `ServerHandler` impl (`#[tool_handler(router = …)]`), so
+    /// per-instance changes such as the sparql description reach clients.
     tool_router: ToolRouter<MooseDevServer>,
     state: Arc<AppState>,
 }
@@ -729,10 +732,17 @@ pub struct MooseDevServer {
 #[tool_router]
 impl MooseDevServer {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-            state,
+        let mut tool_router = Self::tool_router();
+        // The term namespaces are read from the loaded ontologies, never written
+        // into the static description (Constraint 19bb4d8a, Lesson ea5e5f24).
+        if let (Some(guidance), Some(route)) = (
+            sparql::namespace_guidance(&state.store),
+            tool_router.map.get_mut("sparql"),
+        ) {
+            let base = route.attr.description.clone().unwrap_or_default();
+            route.attr.description = Some(format!("{base} {guidance}").into());
         }
+        Self { tool_router, state }
     }
 
     /// Health check — confirms the MCP transport is live. Returns "pong".
@@ -832,6 +842,7 @@ impl MooseDevServer {
                     file,
                     line: args.line,
                     col: args.col,
+                    max_bytes: args.max_bytes,
                 }
             }
             "edit_proposed" => {
@@ -1807,7 +1818,7 @@ impl MooseDevServer {
 
     /// Run a read-only SPARQL query over the local store.
     #[tool(
-        description = "Run an exact, read-only SPARQL query over the local knowledge store. Use this for deterministic structural reads, exhaustive listings, deduplication checks, and explicit named-graph selection; use `get_relevant_context` for fast topical recall and `query` for relationship synthesis. The default graph is the union of named graphs unless `FROM` is specified. SELECT/ASK return SPARQL JSON; CONSTRUCT/DESCRIBE return N-Triples. Key graphs: project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, shapes https://moosedev.dev/kg/ontology/software-architecture/shapes.",
+        description = "Run an exact, read-only SPARQL query over the local knowledge store. Use this for deterministic structural reads, exhaustive listings, deduplication checks, and explicit named-graph selection; use `get_relevant_context` for fast topical recall and `query` for relationship synthesis. The default graph is the union of the queryable graphs; `FROM`/`FROM NAMED`, `SERVICE` and updates are rejected, so name one graph with `GRAPH <iri> { … }` or range over them with `GRAPH ?g { … }`. Results are row-capped (1000) and time-limited (10 s); a capped SELECT carries `truncated: true`. SELECT/ASK return SPARQL JSON; CONSTRUCT/DESCRIBE return N-Triples. An empty result whose query names terms no graph uses comes with a note suggesting the in-use terms. Key graphs: project https://moosedev.dev/kg/project, provenance https://moosedev.dev/kg/provenance, shapes https://moosedev.dev/kg/ontology/software-architecture/shapes.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1823,10 +1834,15 @@ impl MooseDevServer {
         if query.is_empty() {
             return Ok(tool_error("`query` must not be empty"));
         }
-        // Inferred edges are queryable too — refresh them if a write invalidated them.
-        self.state.ensure_enriched();
-        match sparql::run_query(&self.state.store, query) {
-            Ok(output) => Ok(tool_ok(output)),
+        match sparql::run_query(&self.state, query).await {
+            // The note is its own content block, so the result text stays
+            // parseable as SPARQL JSON.
+            Ok(reply) => Ok(CallToolResult::success(
+                std::iter::once(reply.text)
+                    .chain(reply.note)
+                    .map(Content::text)
+                    .collect(),
+            )),
             Err(e) => Ok(tool_error(format!("SPARQL failed: {e}"))),
         }
     }
@@ -1899,7 +1915,7 @@ impl MooseDevServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for MooseDevServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` (alias for `InitializeResult`) is #[non_exhaustive], so it
@@ -2564,7 +2580,7 @@ mod tests {
             policy["properties"]["event"]["enum"],
             serde_json::json!(["entity_touched", "edit_proposed", "decision_point"])
         );
-        for field in ["line", "col"] {
+        for field in ["line", "col", "max_bytes"] {
             assert_eq!(policy["properties"][field]["minimum"], 1);
         }
 

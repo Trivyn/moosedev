@@ -441,7 +441,12 @@ mod tests {
             .filter(|e| {
                 !matches!(
                     e.predicate_local.as_str(),
-                    "supersedes" | "isSupersededBy" | "hasRationale" | "isRationaleFor"
+                    "supersedes"
+                        | "isSupersededBy"
+                        | "hasRationale"
+                        | "isRationaleFor"
+                        | "restates"
+                        | "refines"
                 )
             })
             .collect();

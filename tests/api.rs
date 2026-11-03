@@ -1643,6 +1643,17 @@ async fn policy_endpoint_gates_pushes_and_fires() {
         .clone();
     let constraint = record_accepted_constraint(&state, "alpha must stay stable");
     graph::relate(&state, &constraint, "constrains", &alpha).expect("constrains edge");
+    let description = Quad::new(
+        NamedNode::new(&constraint).unwrap(),
+        NamedNode::new(&state.capture.description).unwrap(),
+        Term::from(Literal::new_simple_literal(
+            "alpha keeps its public signature.",
+        )),
+        GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+    );
+    let mut txn = state.store.start_transaction().unwrap();
+    txn.insert(description.as_ref());
+    txn.commit().unwrap();
 
     let server = test_server(state);
 
@@ -1682,6 +1693,10 @@ async fn policy_endpoint_gates_pushes_and_fires() {
         .as_str()
         .unwrap()
         .contains("alpha must stay stable"));
+    assert!(injected["dossier_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("hasDescription: alpha keeps its public signature.\n"));
 
     // Both acted decisions appended fire telemetry.
     let fires =
@@ -1694,6 +1709,23 @@ async fn policy_endpoint_gates_pushes_and_fires() {
     assert_eq!(lines[0]["verb"], "gate");
     assert_eq!(lines[1]["verb"], "push");
     assert_eq!(lines[0]["host"], "test-http");
+
+    // A host byte bound reaches the engine, which always keeps the first
+    // entity section whole.
+    let bounded = server
+        .post("/api/v1/policy")
+        .json(&json!({
+            "host": "test-http",
+            "kind": "entity_touched",
+            "file": "src/foo/a.rs",
+            "max_bytes": 1,
+        }))
+        .await;
+    bounded.assert_status_ok();
+    assert_eq!(
+        bounded.json::<Value>()["dossier_markdown"],
+        injected["dossier_markdown"]
+    );
 }
 
 #[tokio::test]
@@ -2014,7 +2046,9 @@ async fn source_route_refuses_cross_origin_browser_reads() {
         .add_header("origin", "http://evil.example")
         .await;
     denied.assert_status_forbidden();
-    assert!(denied.text().contains("cross-origin"));
+    // The router-wide guard answers first; the route keeps its own check as
+    // defence in depth. Either refusal names the origin and leaks no source.
+    assert!(denied.text().contains("origin"), "{}", denied.text());
     assert!(!denied.text().contains("build_server"));
 
     // Opaque origins are refused for the same reason.

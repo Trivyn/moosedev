@@ -11,9 +11,14 @@ use oxigraph::model::{GraphNameRef, NamedNodeRef};
 use serde_json::Value;
 
 fn ask(state: &AppState, query: &str) -> bool {
-    let json: Value =
-        serde_json::from_str(&sparql::run_query(&state.store, query).expect("run ASK"))
-            .expect("SPARQL JSON");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let reply = runtime
+        .block_on(sparql::run_query(state, query))
+        .expect("run ASK");
+    let json: Value = serde_json::from_str(&reply.text).expect("SPARQL JSON");
     json["boolean"].as_bool().unwrap_or(false)
 }
 

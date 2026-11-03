@@ -152,6 +152,17 @@ fn constrained_state(data_dir: &Path) -> AppState {
         .expect("alpha minted")
         .clone();
     let constraint = record(&state, "Constraint", "alpha is contract-bound", "accepted");
+    let description = Quad::new(
+        NamedNode::new(&constraint).unwrap(),
+        NamedNode::new(&state.capture.description).unwrap(),
+        Term::from(Literal::new_simple_literal(
+            "alpha keeps its signature for external callers.",
+        )),
+        oxigraph::model::GraphName::NamedNode(NamedNode::new(graph::PROJECT_KG_GRAPH_IRI).unwrap()),
+    );
+    let mut txn = state.store.start_transaction().unwrap();
+    txn.insert(description.as_ref());
+    txn.commit().unwrap();
     graph::relate(&state, &constraint, "constrains", &alpha).expect("constrains edge");
     state
 }
@@ -243,11 +254,12 @@ async fn one_policy_drives_both_hosts() {
         .unwrap()
         .contains("alpha is contract-bound"));
 
-    // PUSH: the injected dossier bytes equal what the hover tool renders.
+    // PUSH: the injected dossier bytes equal what the dossier tool renders; a
+    // host byte bound never drops the first (here only) entity section.
     let push = call_raw(
         &client,
         "evaluate_policy",
-        json!({"host": "opencode", "event": "entity_touched", "file": FILE, "line": 2, "col": 1}),
+        json!({"host": "opencode", "event": "entity_touched", "file": FILE, "line": 2, "col": 1, "max_bytes": 1}),
     )
     .await;
     let push_verdict: Value = serde_json::from_str(response_text(&push)).unwrap();
@@ -263,6 +275,10 @@ async fn one_policy_drives_both_hosts() {
         response_text(&hover),
         "push injects the same dossier bytes hover shows"
     );
+    assert!(push_verdict["dossier_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("hasDescription: alpha keeps its signature for external callers.\n"));
 
     // CAPTURE: proposed only, with provenance, never auto-accepted.
     let capture = call_raw(

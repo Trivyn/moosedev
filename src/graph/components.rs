@@ -50,6 +50,7 @@ pub fn load_components(state: &AppState) -> anyhow::Result<Vec<ComponentEntry>> 
     let system_component = state.resolve_class("SystemComponent")?;
     let class = NamedNodeRef::new(&system_component)?;
     let covers_path = datatype_property_iri(&state.arch_vocab, "coversPath")?;
+    let component_name = datatype_property_iri(&state.arch_vocab, "hasComponentName").ok();
     let mut out = Vec::new();
 
     // SystemComponents are identified by their rdf:type in the project graph.
@@ -66,9 +67,17 @@ pub fn load_components(state: &AppState) -> anyhow::Result<Vec<ComponentEntry>> 
         };
         let iri = subject.as_str().to_string();
 
-        // rdfs:label is canonical for display/search; capture.title is kept as
-        // a compatibility fallback for older or partially seeded records.
+        // rdfs:label is canonical for display/search; hasComponentName is where
+        // a component's own name lives, and capture.title is kept as a
+        // compatibility fallback for older or partially seeded records. A
+        // component seeded without rdfs:label is still known by its own name
+        // rather than its IRI.
         let name = first_literal(&state.store, &iri, moose::RDFS_LABEL)
+            .or_else(|| {
+                component_name
+                    .as_deref()
+                    .and_then(|predicate| first_literal(&state.store, &iri, predicate))
+            })
             .or_else(|| first_literal(&state.store, &iri, &state.capture.title))
             .unwrap_or_else(|| iri.clone());
         let covers_paths = literal_values(&state.store, &iri, &covers_path)?;
@@ -147,29 +156,57 @@ pub fn resolve_component_query<'a>(
         .collect()
 }
 
+/// The `coversPath` value that covers every repository path: a component
+/// whose rules are project-wide, such as one a top-level spec governs.
+pub const COVERS_WHOLE_PROJECT: &str = ".";
+
 /// Return the most specific component that covers `path`.
 ///
 /// `coversPath` values ending in `/` are directory prefixes. Values without a
-/// trailing slash are exact file paths. If several entries match, the longest
-/// matching `coversPath` wins.
+/// trailing slash are exact file paths. [`COVERS_WHOLE_PROJECT`] covers
+/// everything and loses to any other match. If several entries match, the
+/// longest matching `coversPath` wins.
 pub fn best_component_for_path<'a>(
     path: &str,
     components: &'a [ComponentEntry],
 ) -> Option<&'a ComponentEntry> {
-    let mut best: Option<(&ComponentEntry, usize)> = None;
+    components_for_path(path, components).into_iter().next()
+}
+
+/// Every component that covers `path`, most specific first: a file inside a
+/// crate that has its own spec is governed by that crate's rules and by the
+/// rules of every component enclosing it, such as a whole-project spec's.
+/// Specificity is the length of the matching `coversPath` (the whole-project
+/// marker is 0); ties keep catalog order.
+pub fn components_for_path<'a>(
+    path: &str,
+    components: &'a [ComponentEntry],
+) -> Vec<&'a ComponentEntry> {
+    let mut matched: Vec<(&ComponentEntry, usize)> = Vec::new();
     for component in components {
-        for covers_path in &component.covers_paths {
-            let matched = if covers_path.ends_with('/') {
-                path.starts_with(covers_path)
-            } else {
-                path == covers_path
-            };
-            if matched && best.is_none_or(|(_, len)| covers_path.len() > len) {
-                best = Some((component, covers_path.len()));
-            }
+        let specificity = component
+            .covers_paths
+            .iter()
+            .filter_map(|covers_path| {
+                if covers_path == COVERS_WHOLE_PROJECT {
+                    Some(0)
+                } else if covers_path.ends_with('/') {
+                    path.starts_with(covers_path.as_str())
+                        .then_some(covers_path.len())
+                } else {
+                    (path == covers_path).then_some(covers_path.len())
+                }
+            })
+            .max();
+        if let Some(specificity) = specificity {
+            matched.push((component, specificity));
         }
     }
-    best.map(|(component, _)| component)
+    matched.sort_by_key(|(_, specificity)| std::cmp::Reverse(*specificity));
+    matched
+        .into_iter()
+        .map(|(component, _)| component)
+        .collect()
 }
 
 /// Declare repository path coverage for a minted `SystemComponent`.
@@ -416,6 +453,47 @@ mod tests {
     fn miss_returns_none() {
         let components = vec![component("graph", &["src/graph/"])];
         assert!(best_component_for_path("../moose/src/core.rs", &components).is_none());
+    }
+
+    #[test]
+    fn the_whole_project_marker_covers_everything_but_yields_to_any_other_match() {
+        let components = vec![
+            component("project", &[COVERS_WHOLE_PROJECT]),
+            component("graph", &["src/graph/"]),
+        ];
+        assert_eq!(
+            best_component_for_path("README.md", &components)
+                .unwrap()
+                .name,
+            "project"
+        );
+        assert_eq!(
+            best_component_for_path("src/graph/capture.rs", &components)
+                .unwrap()
+                .name,
+            "graph"
+        );
+    }
+
+    #[test]
+    fn every_enclosing_component_covers_a_path_most_specific_first() {
+        let components = vec![
+            component("project", &[COVERS_WHOLE_PROJECT]),
+            component("map", &["map/"]),
+            component("parser", &["map/src/parse.rs"]),
+            component("sim", &["sim/"]),
+        ];
+        let names = |path: &str| -> Vec<String> {
+            components_for_path(path, &components)
+                .into_iter()
+                .map(|component| component.name.clone())
+                .collect()
+        };
+        assert_eq!(names("map/src/parse.rs"), ["parser", "map", "project"]);
+        assert_eq!(names("map/src/lib.rs"), ["map", "project"]);
+        assert_eq!(names("Cargo.toml"), ["project"]);
+        let local = vec![component("map", &["map/"])];
+        assert!(components_for_path("sim/src/lib.rs", &local).is_empty());
     }
 
     #[test]

@@ -461,3 +461,100 @@ fn synthetic_substrate() -> Substrate {
     );
     Substrate::from_index(index, meta, false).expect("synthetic substrate")
 }
+
+#[tokio::test]
+async fn sparql_reply_keeps_result_text_parseable_and_sends_the_note_separately() {
+    let data_dir = fresh_data_dir("sparql");
+    let socket = runtime::socket_path_for(&data_dir);
+    let backend = spawn_backend(build_server(&data_dir, false), socket.clone()).await;
+    wait_for_socket(&socket).await;
+    let client = connect_client(&socket).await;
+
+    // moose-mcp's own text is a 20-row preview; moosedev's reply is the full
+    // result, one content block, and never structuredContent.
+    let rows = call_raw(
+        &client,
+        "sparql",
+        json!({"query": "SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> }"}),
+    )
+    .await;
+    assert_ne!(rows.is_error, Some(true));
+    assert_eq!(rows.content.len(), 1);
+    assert!(rows.structured_content.is_none());
+    let json: Value = serde_json::from_str(response_text(&rows)).expect("SPARQL JSON");
+    assert!(json["results"]["bindings"].as_array().unwrap().len() > 20);
+
+    // An unknown term: the note is a second block, the first stays JSON.
+    let empty = call_raw(
+        &client,
+        "sparql",
+        json!({"query": "SELECT ?s WHERE { ?s <https://moosedev.dev/kg/ontology/software-architecture#hasNoSuchThing> ?o }"}),
+    )
+    .await;
+    assert_ne!(empty.is_error, Some(true));
+    assert_eq!(empty.content.len(), 2, "{:?}", empty.content);
+    serde_json::from_str::<Value>(response_text(&empty)).expect("first block is SPARQL JSON");
+    let note = empty.content[1].as_text().expect("note text");
+    assert!(note.text.contains("hasNoSuchThing"), "{}", note.text);
+
+    // A rejection is a tool error naming the alternative.
+    let from = call_raw(
+        &client,
+        "sparql",
+        json!({"query": "SELECT ?s FROM <https://moosedev.dev/kg/project> WHERE { ?s ?p ?o }"}),
+    )
+    .await;
+    assert_eq!(from.is_error, Some(true));
+    assert!(response_text(&from).contains("GRAPH"));
+
+    client.cancel().await.ok();
+    backend.abort();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
+async fn served_sparql_description_names_the_loaded_term_namespaces() {
+    let data_dir = fresh_data_dir("sparql-namespaces");
+    let socket = runtime::socket_path_for(&data_dir);
+    let state = AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap app state");
+    let decision = state.resolve_class("ArchitecturalDecision").unwrap();
+    let expected = moosedev::sparql::term_namespaces(&state.store);
+    let backend = spawn_backend(MooseDevServer::new(Arc::new(state)), socket.clone()).await;
+    wait_for_socket(&socket).await;
+    let client = connect_client(&socket).await;
+
+    let tools = client.list_all_tools().await.expect("list tools");
+    let sparql = tools
+        .iter()
+        .find(|tool| tool.name == "sparql")
+        .expect("sparql tool");
+    let description = sparql.description.as_deref().unwrap_or_default();
+    assert!(!expected.is_empty());
+    for ns in &expected {
+        assert!(
+            description.contains(&format!("<{}>", ns.namespace)),
+            "{description}"
+        );
+    }
+
+    // A query written from the advertised namespace finds the class.
+    let arch = expected
+        .iter()
+        .find(|ns| decision.starts_with(&ns.namespace))
+        .unwrap();
+    let reply = call_raw(
+        &client,
+        "sparql",
+        json!({"query": format!(
+            "PREFIX a: <{}> ASK {{ a:ArchitecturalDecision ?p ?o }}",
+            arch.namespace
+        )}),
+    )
+    .await;
+    let json: Value = serde_json::from_str(response_text(&reply)).unwrap();
+    assert_eq!(json["boolean"], true);
+
+    client.cancel().await.ok();
+    backend.abort();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

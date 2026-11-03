@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::graph::{
     direct_records_for_entity, entities_by_symbol, first_literal, get_entity_dossier, local_name,
-    render_markdown, resolve_target_entity, AppState, CodeTerms, DossierTarget, RecordSummary,
+    render_dossiers_within, resolve_target_entity, AppState, CodeTerms, DossierTarget,
+    RecordSummary,
 };
 
 use fires::{append_fire_best_effort, FireEvent};
@@ -40,6 +41,10 @@ pub enum PolicyEvent {
         line: Option<u32>,
         #[serde(default)]
         col: Option<u32>,
+        /// The host's byte bound for the injected markdown: entity sections past
+        /// it keep only what a bound never omits (see `render_dossiers_within`).
+        #[serde(default)]
+        max_bytes: Option<usize>,
     },
     /// The agent proposed an edit — the GATE verb's input. Hosts rarely have a
     /// cursor at hook time: `anchor` carries the edit's own text (e.g. the
@@ -114,9 +119,11 @@ pub struct CaptureSpec {
 pub enum PolicyDecision {
     /// Nothing to do — silence is the default (no fire is logged).
     Allow,
-    /// PUSH: inject this dossier markdown. The bytes are produced by the same
-    /// `get_entity_dossier` + `render_markdown` path hover uses, so push and
-    /// hover show identical content by construction.
+    /// PUSH: inject this dossier markdown. The bytes are the exhaustive render
+    /// (`get_entity_dossier` + `render_dossiers_within`) the MCP
+    /// `get_entity_dossier` tool returns for one entity, so push and that tool
+    /// agree by construction; a host byte bound only shortens later entity
+    /// sections of a file push. Editor hover renders its own compact view.
     Inject {
         dossier_markdown: String,
         entities: Vec<String>,
@@ -145,7 +152,12 @@ pub fn evaluate(
     event: &PolicyEvent,
 ) -> anyhow::Result<PolicyDecision> {
     match event {
-        PolicyEvent::EntityTouched { file, line, col } => push_decision(state, file, *line, *col),
+        PolicyEvent::EntityTouched {
+            file,
+            line,
+            col,
+            max_bytes,
+        } => push_decision(state, file, *line, *col, *max_bytes),
         PolicyEvent::EditProposed {
             file,
             line,
@@ -222,6 +234,7 @@ fn push_decision(
     file: &str,
     line: Option<u32>,
     col: Option<u32>,
+    max_bytes: Option<usize>,
 ) -> anyhow::Result<PolicyDecision> {
     let targets: Vec<DossierTarget> = match (line, col) {
         (Some(line), Some(col)) => vec![DossierTarget::Position {
@@ -235,26 +248,22 @@ fn push_decision(
             .collect(),
     };
 
-    let mut sections = Vec::new();
-    let mut entities = Vec::new();
-    let mut records = Vec::new();
+    let mut dossiers = Vec::new();
     for target in &targets {
-        let Some(dossier) = get_entity_dossier(state, target)? else {
-            continue;
-        };
-        sections.push(render_markdown(&dossier));
-        for record in &dossier.direct_records {
-            records.push(record_ref(record));
+        if let Some(dossier) = get_entity_dossier(state, target)? {
+            dossiers.push(dossier);
         }
-        entities.push(dossier.entity_iri);
     }
-    if sections.is_empty() {
+    if dossiers.is_empty() {
         return Ok(PolicyDecision::Allow);
     }
     Ok(PolicyDecision::Inject {
-        dossier_markdown: sections.join("\n"),
-        entities,
-        records,
+        dossier_markdown: render_dossiers_within(&dossiers, max_bytes),
+        entities: dossiers.iter().map(|d| d.entity_iri.clone()).collect(),
+        records: dossiers
+            .iter()
+            .flat_map(|d| d.direct_records.iter().map(record_ref))
+            .collect(),
     })
 }
 
@@ -464,17 +473,27 @@ fn anchor_line_span(repo_root: &Path, file: &str, anchor: &str) -> Option<(u32, 
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Minted CodeEntity IRIs for every definition in one file.
+/// Minted CodeEntity IRIs for one file: its whole-file module, when the
+/// producer synthesizes one, then every definition.
 fn file_entity_iris(state: &AppState, file: &str) -> anyhow::Result<Vec<String>> {
     let Some(substrate) = state.substrate() else {
         return Ok(Vec::new());
     };
     let terms = CodeTerms::resolve(state)?;
     let entities = entities_by_symbol(state, &terms)?;
-    Ok(substrate
+    // A synthetic whole-file module (Rust) is never a position target, but
+    // knowledge anchored to it concerns the whole file, so it leads the push.
+    let module = substrate
+        .file_module_symbol(file)
+        .map(|entry| entry.normalized_symbol);
+    let definitions = substrate
         .definitions_in_file(file)
         .into_iter()
-        .filter_map(|def| entities.get(&def.entry.normalized_symbol).cloned())
+        .map(|def| def.entry.normalized_symbol);
+    Ok(module
+        .into_iter()
+        .chain(definitions)
+        .filter_map(|symbol| entities.get(&symbol).cloned())
         .collect())
 }
 

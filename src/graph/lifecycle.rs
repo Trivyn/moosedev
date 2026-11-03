@@ -127,6 +127,16 @@ pub fn in_working_set(status: &str) -> bool {
         || is_retired(status))
 }
 
+/// Whether a record is still awaiting ratification.
+///
+/// The deferred supersession path consumes exactly this state: a `supersedes`
+/// edge is legitimate on a *proposed* replacement because accepting it flips the
+/// predecessor in the same transaction (`proposals::accept_proposed_supersession`).
+/// On any other status that flip has already had its only chance to happen.
+pub fn is_proposed(status: &str) -> bool {
+    status.eq_ignore_ascii_case("proposed")
+}
+
 /// A decision change: the replacement to record, the decision it supersedes, and
 /// the rationale (the *why*) for the change.
 pub struct SupersedeInput {
@@ -271,6 +281,7 @@ fn supersede_decision_inner(
         // stale again. Legacy callers deliberately skip this whole-graph read.
         state.try_ensure_enriched()?;
     }
+    let _proposal_guard = state.lock_proposal_writes()?;
     let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
 
     // Precondition: the superseded subject must be a recorded knowledge item — an
@@ -353,7 +364,6 @@ fn supersede_decision_inner(
             _ => "accepted",
         });
     let proposed = effective_status.eq_ignore_ascii_case("proposed");
-    let _proposal_guard = proposed.then(|| state.lock_proposal_writes()).transpose()?;
     if proposed {
         let predecessor_status =
             first_literal(&state.store, &input.superseded_iri, &state.capture.status)
@@ -571,6 +581,9 @@ pub fn retract_decision(
     author: &str,
     when: DateTime<Utc>,
 ) -> anyhow::Result<RetractOutcome> {
+    // Serialized with every other proposal/lifecycle write: the preflight
+    // reads and the status flip must not interleave with an accept/reject.
+    let _guard = state.lock_proposal_writes()?;
     let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let subject = NamedNode::new(target_iri)
         .map_err(|e| anyhow::anyhow!("invalid target IRI {target_iri}: {e}"))?;
@@ -685,6 +698,17 @@ pub fn relate(
     predicate_local: &str,
     object_iri: &str,
 ) -> anyhow::Result<RelateOutcome> {
+    let _guard = state.lock_proposal_writes()?;
+    relate_unlocked(state, subject_iri, predicate_local, object_iri)
+}
+
+/// Caller holds `AppState::lock_proposal_writes` across relation validation and mutation.
+pub(crate) fn relate_unlocked(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    object_iri: &str,
+) -> anyhow::Result<RelateOutcome> {
     let subject = NamedNode::new(subject_iri)
         .map_err(|e| anyhow::anyhow!("invalid subject IRI {subject_iri}: {e}"))?;
     let object = NamedNode::new(object_iri)
@@ -698,6 +722,14 @@ pub fn relate(
             "unknown relationship {predicate_local:?} (not an object property in the architecture ontology): {e}"
         )
     })?;
+
+    // Preconditions: a supersession edge decides another record's lifecycle, and
+    // SHACL cannot see that — its domain/range for these predicates is
+    // InformationRecord→InformationRecord, which any record pair satisfies.
+    guard_supersession_edge(
+        predicate_local,
+        first_literal(&state.store, subject_iri, &state.capture.status).as_deref(),
+    )?;
 
     // Preconditions: endpoint classes must satisfy the predicate's SHACL shape
     // contract. Checked before the transaction, so a bad edge writes nothing.
@@ -723,4 +755,56 @@ pub fn relate(
         predicate_iri,
         object_iri: object_iri.to_string(),
     })
+}
+
+/// Refuse a supersession edge that no ratification will ever complete.
+///
+/// A `supersedes` edge is only half of a supersession: the other half is flipping
+/// the predecessor to `superseded`, and exactly two paths write it —
+/// [`supersede_decision`], atomically, and `proposals::accept_proposed_supersession`,
+/// when a **proposed** replacement carrying the edge and a proposed rationale is
+/// ratified. Asserted on a record that is already accepted, the edge is a
+/// half-write with no remaining opportunity to complete: the predecessor keeps
+/// its status, stays in the working set, and recall returns a replaced record as
+/// current. A status-less legacy record counts as accepted here, matching
+/// [`is_accepted`].
+///
+/// `isSupersededBy` is refused outright: it is the reasoner-materialized inverse
+/// (and [`supersede_decision`] writes it explicitly), never something a caller
+/// asserts to retire a record.
+///
+/// Diagnosed 2026-08-10 and recorded as still open in AD `28646610`; by the time
+/// it was closed it had produced three live instances across the stores, two of
+/// them unnoticed for a month.
+/// `subject_status` is the subject's lifecycle status, `None` when it carries no
+/// status literal. Taken as an argument rather than read here so capture can
+/// apply the identical rule to the status a record is being written *with*,
+/// before that record exists to be read.
+pub(crate) fn guard_supersession_edge(
+    predicate_local: &str,
+    subject_status: Option<&str>,
+) -> anyhow::Result<()> {
+    if predicate_local.eq_ignore_ascii_case("isSupersededBy") {
+        anyhow::bail!(
+            "`isSupersededBy` is the inverse of `supersedes` and is written by \
+             supersede_decision (or materialized by the reasoner) — asserting it directly \
+             retires nothing, because the record's lifecycle status is left untouched"
+        );
+    }
+    if !predicate_local.eq_ignore_ascii_case("supersedes") {
+        return Ok(());
+    }
+    let status = subject_status.filter(|status| !status.is_empty());
+    anyhow::ensure!(
+        status.is_some_and(is_proposed),
+        "a `supersedes` edge on {} record never flips the predecessor, so the superseded \
+         record stays in the working set and recall returns it as current. Use \
+         supersede_decision to mint the replacement, or capture the replacement as \
+         `proposed` with a `hasRationale` so ratification flips the predecessor atomically.",
+        match status {
+            Some(status) => format!("an already-{status}"),
+            None => "a status-less (legacy)".to_string(),
+        }
+    );
+    Ok(())
 }

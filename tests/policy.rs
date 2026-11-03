@@ -21,6 +21,7 @@ use scip::types::{
 };
 
 const COVERS_PATH: &str = "https://trivyn.io/ontologies/software/architecture#coversPath";
+const MODULE_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/";
 const ALPHA_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/alpha().";
 const BETA_RAW: &str = "rust-analyzer cargo testpkg 0.1.0 foo/beta().";
 const ALPHA_NORM: &str = "rust-analyzer cargo testpkg . foo/alpha().";
@@ -69,6 +70,18 @@ fn add_def(d: &mut Document, symbol: &str, name: &str, signature: &str, line: i3
 fn synthetic_substrate() -> Substrate {
     let mut index = Index::new();
     let mut module_doc = doc(FILE);
+    // rust-analyzer's synthetic whole-file module container.
+    let mut module = SymbolInformation::new();
+    module.symbol = MODULE_RAW.to_string();
+    module.display_name = "foo".to_string();
+    module.kind = EnumOrUnknown::new(symbol_information::Kind::Module);
+    module_doc.symbols.push(module);
+    let mut module_occ = Occurrence::new();
+    module_occ.symbol = MODULE_RAW.to_string();
+    module_occ.range = vec![0, 0, 2, 0];
+    module_occ.symbol_roles = 1;
+    module_occ.enclosing_range = vec![0, 0, 2, 0];
+    module_doc.occurrences.push(module_occ);
     add_def(&mut module_doc, ALPHA_RAW, "alpha", "pub fn alpha()", 0);
     add_def(&mut module_doc, BETA_RAW, "beta", "pub fn beta()", 1);
     index.documents.push(module_doc);
@@ -353,6 +366,7 @@ fn push_injects_hover_bytes_and_fires() {
         file: FILE.to_string(),
         line: Some(1),
         col: Some(1),
+        max_bytes: None,
     };
     let decision =
         evaluate_and_fire(&f.state, &f.repo_root, &event, "test-host").expect("evaluate");
@@ -377,7 +391,7 @@ fn push_injects_hover_bytes_and_fires() {
         .unwrap()
         .expect("dossier exists"),
     );
-    assert_eq!(dossier_markdown, hover, "push == hover bytes");
+    assert_eq!(dossier_markdown, hover, "push == MCP dossier bytes");
     assert_eq!(entities, vec![f.alpha.clone()]);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].iri, f.constraint);
@@ -396,6 +410,7 @@ fn file_touch_without_records_is_silent() {
         file: FILE.to_string(),
         line: None,
         col: None,
+        max_bytes: None,
     };
     let decision =
         evaluate_and_fire(&f.state, &f.repo_root, &event, "test-host").expect("evaluate");
@@ -415,6 +430,7 @@ fn file_touch_pushes_all_knowledge_bearing_entities() {
         file: FILE.to_string(),
         line: None,
         col: None,
+        max_bytes: None,
     };
     let decision = evaluate(&f.state, &f.repo_root, &event).expect("evaluate");
     let PolicyDecision::Inject {
@@ -428,6 +444,185 @@ fn file_touch_pushes_all_knowledge_bearing_entities() {
     assert_eq!(entities.len(), 2, "both entities pushed");
     assert!(dossier_markdown.contains("must stay pure"));
     assert!(dossier_markdown.contains("beta gotcha"));
+}
+
+#[test]
+fn file_touch_shows_a_shared_record_claim_once() {
+    let f = setup("policy-file-dedup");
+    insert_quad(
+        &f.state,
+        &f.constraint,
+        &f.state.capture.description,
+        Literal::new_simple_literal("Pure functions only.").into(),
+    );
+    graph::relate(&f.state, &f.constraint, "constrains", &f.alpha).expect("constrains alpha");
+    graph::relate(&f.state, &f.constraint, "constrains", &f.beta).expect("constrains beta");
+
+    let event = PolicyEvent::EntityTouched {
+        file: FILE.to_string(),
+        line: None,
+        col: None,
+        max_bytes: None,
+    };
+    let decision = evaluate(&f.state, &f.repo_root, &event).expect("evaluate");
+    let PolicyDecision::Inject {
+        dossier_markdown,
+        entities,
+        ..
+    } = decision
+    else {
+        panic!("expected an inject");
+    };
+    assert_eq!(entities.len(), 2, "both entities pushed");
+    assert_eq!(
+        dossier_markdown
+            .matches("hasDescription: Pure functions only.")
+            .count(),
+        1,
+        "{dossier_markdown}"
+    );
+    assert!(
+        dossier_markdown.contains("\nclaim shown above for `alpha`\n"),
+        "{dossier_markdown}"
+    );
+}
+
+#[test]
+fn file_touch_within_max_bytes_shortens_later_sections_to_protected_knowledge() {
+    let f = setup("policy-max-bytes");
+    let component = graph::load_components(&f.state).unwrap()[0]
+        .iri
+        .clone()
+        .expect("component IRI");
+    // alpha carries the component's records directly, so beta's section is the
+    // first to list them as component context.
+    graph::relate(&f.state, &f.constraint, "constrains", &f.alpha).expect("constrains alpha");
+    let rule = record(&f.state, "Constraint", "foo component rule", "accepted");
+    let decision = record(
+        &f.state,
+        "ArchitecturalDecision",
+        "foo component decision",
+        "accepted",
+    );
+    for iri in [&rule, &decision] {
+        graph::relate(&f.state, iri, "concerns", &component).expect("concerns component");
+        graph::relate(&f.state, iri, "concerns", &f.alpha).expect("concerns alpha");
+    }
+    let lesson = record(&f.state, "Lesson", "beta gotcha", "accepted");
+    insert_quad(
+        &f.state,
+        &lesson,
+        &f.state.capture.description,
+        Literal::new_simple_literal("beta caches its input.").into(),
+    );
+    graph::relate(&f.state, &lesson, "concerns", &f.beta).expect("concerns beta");
+
+    let push = |max_bytes: Option<usize>| {
+        let event = PolicyEvent::EntityTouched {
+            file: FILE.to_string(),
+            line: None,
+            col: None,
+            max_bytes,
+        };
+        match evaluate(&f.state, &f.repo_root, &event).expect("evaluate") {
+            PolicyDecision::Inject {
+                dossier_markdown,
+                entities,
+                records,
+            } => (dossier_markdown, entities, records),
+            other => panic!("expected an inject, got {other:?}"),
+        }
+    };
+
+    let (whole, whole_entities, whole_records) = push(None);
+    assert_eq!(
+        push(Some(1_000_000)).0,
+        whole,
+        "a bound that fits changes nothing"
+    );
+    assert_eq!(
+        whole
+            .matches("- [ArchitecturalDecision] foo component decision")
+            .count(),
+        2,
+        "{whole}"
+    );
+
+    let (bounded, entities, records) = push(Some(1));
+    assert_eq!(entities, whole_entities, "every entity still renders");
+    assert_eq!(records.len(), whole_records.len());
+    // beta keeps its direct record, its claim and the component's accepted
+    // Constraint title; only the other component title is left out.
+    assert!(
+        bounded.contains("- [Lesson] beta gotcha - accepted"),
+        "{bounded}"
+    );
+    assert!(
+        bounded.contains("\nhasDescription: beta caches its input.\n"),
+        "{bounded}"
+    );
+    assert_eq!(
+        bounded.matches("- [Constraint] foo component rule").count(),
+        2,
+        "{bounded}"
+    );
+    assert_eq!(
+        bounded
+            .matches("- [ArchitecturalDecision] foo component decision")
+            .count(),
+        1,
+        "{bounded}"
+    );
+    assert!(
+        bounded.contains("\n1 further record concerns component foo (ArchitecturalDecision: 1), not necessarily this code; search project knowledge for records about foo\n"),
+        "{bounded}"
+    );
+    assert!(
+        bounded.ends_with("\n1 entity section shortened to direct records and accepted Constraints by the host's 1-byte bound: `beta`; retrieve it in full with get_entity_dossier\n"),
+        "{bounded}"
+    );
+}
+
+/// Rust's synthetic whole-file module is never a position target, but knowledge
+/// anchored to it reaches every push of its file.
+#[test]
+fn file_touch_pushes_knowledge_anchored_to_the_whole_file_module() {
+    let f = setup("policy-module-anchor");
+    let lesson = record(&f.state, "Lesson", "foo module gotcha", "accepted");
+    let module = graph::link_code(
+        &f.state,
+        &lesson,
+        "concerns",
+        &graph::CodeSelector::Symbol(MODULE_RAW.to_string()),
+        "tester",
+    )
+    .expect("link the module")
+    .entity_iri;
+
+    let touch = |line: Option<u32>, col: Option<u32>| {
+        let event = PolicyEvent::EntityTouched {
+            file: FILE.to_string(),
+            line,
+            col,
+            max_bytes: None,
+        };
+        evaluate(&f.state, &f.repo_root, &event).expect("evaluate")
+    };
+    let PolicyDecision::Inject {
+        dossier_markdown,
+        entities,
+        ..
+    } = touch(None, None)
+    else {
+        panic!("a file push carries the module's knowledge");
+    };
+    assert_eq!(entities, vec![module]);
+    assert!(
+        dossier_markdown.contains("foo module gotcha"),
+        "{dossier_markdown}"
+    );
+    // 1:1 is alpha's token, never the module container.
+    assert!(matches!(touch(Some(1), Some(1)), PolicyDecision::Allow));
 }
 
 #[test]

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::api::handlers;
 use crate::graph::AppState;
@@ -72,10 +71,6 @@ pub fn build_routes(state: Arc<AppState>) -> Router {
         .nest("/api/v1", api)
         .fallback(handlers::static_files::serve_static)
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(super::security::cors_layer())
+        .layer(axum::middleware::from_fn(super::security::guard_request))
 }

@@ -275,9 +275,27 @@ trivyn:confidence a owl:AnnotationProperty ;
     skos:altLabel "results in".
 :supersedes a owl:ObjectProperty ;
     rdfs:label "supersedes" ;
+    rdfs:subPropertyOf prov:wasRevisionOf ;
     skos:definition "Relates an architectural decision to the one it replaces.";
+    skos:historyNote "Aligned to prov:wasRevisionOf 2026-09-12 (interoperability only; approved by the maintainer with :restates and :refines)." ;
     rdfs:domain :InformationRecord;
     rdfs:range :InformationRecord.
+
+:restates a owl:ObjectProperty, owl:SymmetricProperty ;
+    rdfs:label "restates" ;
+    rdfs:subPropertyOf prov:alternateOf ;
+    rdfs:domain :InformationRecord ;
+    rdfs:range :InformationRecord ;
+    skos:definition "Relates two information records that state the same claim: each presents an aspect of the same knowledge without either replacing the other. Asserted by capture reconciliation when a proposal is judged to reuse an existing record unchanged; carries a trivyn:confidence annotation. Neither record is retracted; the existing record remains the current one." ;
+    skos:historyNote "Added 2026-09-12 with maintainer approval so reconciliation dispositions become graph edges instead of journal metadata; subproperty of prov:alternateOf because records are already PROV entities through the provenance graph. owl:sameAs rejected (identity would merge distinct records); skos:exactMatch rejected (types subjects as skos:Concept under domain/range enrichment)." .
+
+:refines a owl:ObjectProperty ;
+    rdfs:label "refines" ;
+    rdfs:subPropertyOf prov:specializationOf ;
+    rdfs:domain :InformationRecord ;
+    rdfs:range :InformationRecord ;
+    skos:definition "Relates an information record to a more general existing record whose claim it narrows or makes more specific, without replacing it. Asserted by capture reconciliation for a revised proposal; carries a trivyn:confidence annotation." ;
+    skos:historyNote "Added 2026-09-12 with maintainer approval; subproperty of prov:specializationOf. No inverse declared." .
 :constrains a owl:ObjectProperty ;
     rdfs:label "constrains" ;
     rdfs:domain :Constraint ;

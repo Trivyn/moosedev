@@ -22,24 +22,22 @@ pub async fn align_concept(
         anyhow::anyhow!("alignment index not built — call AppState::build_alignment_index first")
     })?;
 
-    let leaf = LeafClassInput {
-        iri: format!("urn:moosedev:leaf:{}", slug(label)),
-        label: label.to_string(),
-        definition: definition.map(str::to_string),
-        surface_labels,
-        expected_category: None,
-        sampled_values: Vec::new(),
-    };
+    let mut leaf = LeafClassInput::new(format!("urn:moosedev:leaf:{}", slug(label)), label);
+    leaf.definition = definition.map(str::to_string);
+    leaf.surface_labels = surface_labels;
 
     // Ban the vacuous root: every knowledge class descends from InformationRecord,
     // so committing there adds no alignment information. MOOSE deliberately ships
     // no ontology-specific defaults ("calibration is the caller's responsibility"),
     // and this is the one exclusion that can never be a correct answer. Resolved by
     // local name so no namespace is baked into code (Constraint 19bb4d8a).
-    let config = AlignmentConfig {
+    let mut config = AlignmentConfig {
         banned_parents: vec![state.resolve_class("InformationRecord")?],
         ..AlignmentConfig::default()
     };
+    // MOOSE (since 0.12) answers `Unavailable` without the target ontology's
+    // oracle; it is built with the vector index above.
+    config.ontology_oracle = state.ontology_oracle.clone();
 
     // L1 + L2 only (no LLM); an empty CategoryMappings falls back cleanly.
     Ok(suggest_parent(

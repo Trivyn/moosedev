@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::Json;
 use moose::chat::session_db::SessionDb;
-use moose::types::{ChatMessage, ChatRequest, LlmAssistLevel, Role};
+use moose::types::{ChatMessage, ChatRequest, LlmAssistLevel, Role, TranscriptMessage};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 
 use crate::api::error::ApiError;
@@ -180,7 +180,9 @@ fn to_moose_message(message: ChatMessagePayload) -> ChatMessage {
     }
 }
 
-fn from_moose_message(message: ChatMessage) -> ChatMessagePayload {
+/// A stored transcript row as the API shows it; its `understood_as` echo is
+/// not part of the payload.
+fn from_moose_message(message: TranscriptMessage) -> ChatMessagePayload {
     let role = match message.role {
         Role::System => "system",
         Role::User => "user",
