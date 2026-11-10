@@ -101,6 +101,21 @@ pub fn relevant_context_snapshot(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    // Records outside the recall working set: a non-current lifecycle status, or
+    // a current record that only explains non-current ones (a retraction's
+    // Rationale). include_history admits both.
+    let explains_history = if include_history {
+        HashSet::new()
+    } else {
+        explains_only_historical_records(state)?
+    };
+    let eligible = |iri: &str| {
+        include_history
+            || (first_literal(&state.store, iri, &state.capture.status)
+                .as_deref()
+                .is_none_or(in_working_set)
+                && !explains_history.contains(iri))
+    };
     let class_iris: Vec<String> = state
         .arch_vocab
         .classes
@@ -136,10 +151,12 @@ pub fn relevant_context_snapshot(
             let ranked_limit = if include_history {
                 limit
             } else {
-                limit.saturating_add(count_non_working_set_subjects(
-                    &state.store,
-                    &state.capture.status,
-                ))
+                limit
+                    .saturating_add(count_non_working_set_subjects(
+                        &state.store,
+                        &state.capture.status,
+                    ))
+                    .saturating_add(explains_history.len())
             };
             let mut hits: Vec<(String, String)> = state
                 .entity_index
@@ -166,12 +183,7 @@ pub fn relevant_context_snapshot(
             }
             hits
         }
-        None => list_instances_filtered(&state.store, &class_iris, limit, |iri| {
-            include_history
-                || first_literal(&state.store, iri, &state.capture.status)
-                    .as_deref()
-                    .is_none_or(in_working_set)
-        }),
+        None => list_instances_filtered(&state.store, &class_iris, limit, |iri| eligible(iri)),
     };
 
     // Apply working-set eligibility before the result budget. Status-less
@@ -180,12 +192,7 @@ pub fn relevant_context_snapshot(
     // records are audit history rather than authoritative recall.
     let mut items: Vec<ContextItem> = subjects
         .into_iter()
-        .filter(|(iri, _)| {
-            include_history
-                || first_literal(&state.store, iri, &state.capture.status)
-                    .as_deref()
-                    .is_none_or(in_working_set)
-        })
+        .filter(|(iri, _)| eligible(iri))
         .take(limit)
         .map(|(iri, class_iri)| build_context_item(state, iri, class_iri, include_history))
         .collect();
@@ -245,7 +252,9 @@ pub fn relevant_context_snapshot(
                     neighbor_class,
                     include_history,
                 );
-                if !include_history && item.is_historical() {
+                if !include_history
+                    && (item.is_historical() || explains_history.contains(&neighbor_iri))
+                {
                     continue; // stay in the current working set
                 }
                 item.properties
@@ -684,6 +693,51 @@ fn list_instances_filtered(
         }
     }
     out
+}
+
+/// Records whose only role is explaining records outside the working set: each
+/// is the `hasRationale` object of at least one record, and every record it is
+/// the rationale for is retired, rejected or still proposed.
+///
+/// A retraction attaches an `accepted` Rationale to the record it deprecates,
+/// because the Rationale is itself current knowledge (why the record went).
+/// Recall must still leave it out: it explains nothing in the working set, and
+/// after a bulk retirement those Rationales crowd every topic. A supersession's
+/// Rationale hangs off the current replacement, so it stays.
+fn explains_only_historical_records(state: &AppState) -> anyhow::Result<HashSet<String>> {
+    let has_rationale = state.resolve_object_property("hasRationale")?;
+    let has_rationale = NamedNodeRef::new(&has_rationale)?;
+    let graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
+    let mut explains_current = HashSet::new();
+    let mut explains_history = HashSet::new();
+    for quad in state
+        .store
+        .quads_for_pattern(
+            None,
+            Some(has_rationale),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+    {
+        let (oxigraph::model::NamedOrBlankNode::NamedNode(explained), Term::NamedNode(rationale)) =
+            (&quad.subject, &quad.object)
+        else {
+            continue;
+        };
+        let explained_current =
+            first_literal(&state.store, explained.as_str(), &state.capture.status)
+                .as_deref()
+                .is_none_or(in_working_set);
+        let rationale = rationale.as_str().to_string();
+        if explained_current {
+            explains_current.insert(rationale);
+        } else {
+            explains_history.insert(rationale);
+        }
+    }
+    explains_history.retain(|iri| !explains_current.contains(iri));
+    Ok(explains_history)
 }
 
 /// Count distinct subjects whose lifecycle status is outside the authoritative
