@@ -1662,7 +1662,7 @@ impl MooseDevServer {
 
     /// Ask a natural-language question over the project knowledge graph.
     #[tool(
-        description = "Answer one short, focused natural-language question by planning walks across relationships in the authoritative project knowledge graph and synthesizing the resulting records. Proposed and rejected records, including incident inverse links, are excluded; superseded and deprecated records remain available for evolution questions. Use this when `get_relevant_context` recall is insufficient and the answer needs relationship reasoning; use `sparql` instead for exact, bulk, deterministic, or all-lifecycle audit reads. Read-only; returns a synthesized answer, confidence, and an auditable symbolic reasoning trace.",
+        description = "Answer one short, focused natural-language question by planning walks across relationships in the authoritative project knowledge graph and synthesizing the resulting records. Proposed and rejected records, including incident inverse links, are excluded; superseded and deprecated records remain available for evolution questions. Use this when `get_relevant_context` recall is insufficient and the answer needs relationship reasoning; use `sparql` instead for exact, bulk, deterministic, or all-lifecycle audit reads. A question that runs past the time limit is stopped with an error; ask a narrower one. Read-only; returns a synthesized answer, confidence, and an auditable symbolic reasoning trace.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::Json;
 use moose::chat::session_db::SessionDb;
-use moose::types::{ChatMessage, ChatRequest, LlmAssistLevel, Role, TranscriptMessage};
+use moose::types::{
+    ChatMessage, ChatRequest, EngineError, LlmAssistLevel, Role, TranscriptMessage,
+};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 
 use crate::api::error::ApiError;
@@ -63,6 +65,12 @@ pub async fn chat(
         include_metrics: payload.include_metrics,
         llm_assist_level: assist_level(payload.llm_assist_level),
         clarification_reply,
+        // Relative dates resolve against the moment the turn arrives, the turn
+        // runs on the engine's default time budget, and no executed SPARQL is
+        // returned: the web chat exposes none of these to clients.
+        reference_time: None,
+        include_queries: false,
+        turn_budget_ms: None,
     };
 
     let llm = state.llm.with_fresh_usage();
@@ -76,7 +84,13 @@ pub async fn chat(
         request,
     )
     .await
-    .map_err(|e| ApiError::internal(format!("chat failed: {e}")))?;
+    .map_err(|e| match e {
+        EngineError::Timeout { budget } => ApiError::gateway_timeout(format!(
+            "the chat turn was stopped after its {}s time limit; try a narrower question",
+            budget.as_secs()
+        )),
+        e => ApiError::internal(format!("chat failed: {e}")),
+    })?;
 
     let session_id = response.moose.as_ref().map(|ext| ext.session_id.clone());
     let mut value = serde_json::to_value(response)

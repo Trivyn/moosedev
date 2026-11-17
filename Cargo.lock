@@ -859,7 +859,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -960,7 +960,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1652,9 +1652,9 @@ dependencies = [
 
 [[package]]
 name = "howl-reasoner"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "981ba54c26559fdc33688fa94f32ada16edde1e50e7c719ddad51f882470bd09"
+checksum = "d9408a84955b1a5c2f305fa51f16951a442a8d2766d9e981452bb5b5439195fe"
 dependencies = [
  "cc",
  "slop-rdf-sys",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "moose"
-version = "0.19.1"
+version = "0.29.0"
 dependencies = [
  "async-trait",
  "candle-core",
@@ -2335,6 +2335,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "snarl-shacl",
+ "spareval",
  "spargebra",
  "sqlx",
  "strsim",
@@ -2348,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "moose-lang"
-version = "0.19.1"
+version = "0.29.0"
 dependencies = [
  "caseless",
  "moult",
@@ -2360,9 +2361,10 @@ dependencies = [
 
 [[package]]
 name = "moose-mcp"
-version = "0.19.1"
+version = "0.29.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "moose",
  "oxigraph",
@@ -2454,7 +2456,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2708,7 +2710,7 @@ dependencies = [
  "sparesults",
  "spareval",
  "spargebra",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2735,7 +2737,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "ryu-js",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2749,7 +2751,7 @@ dependencies = [
  "oxsdatatypes",
  "rand 0.9.4",
  "sha2",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2761,7 +2763,7 @@ dependencies = [
  "oxrdf",
  "oxrdfxml",
  "oxttl",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2773,7 +2775,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "quick-xml",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2790,7 +2792,7 @@ name = "oxsdatatypes"
 version = "0.2.2"
 source = "git+https://github.com/Trivyn/oxigraph-trivyn.git?tag=trivyn-0.5.9.1#cb7ce9418bb701483fa8ab4b3c3616e6412affed"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2802,7 +2804,7 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3555,7 +3557,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3911,9 +3913,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slop-rdf-sys"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa13d9ba65ef470a9f6cd8c1683226e1280219a2578d751f22cc8f840801efb1"
+checksum = "feb1d8465cd4ad6c1ca17a43ce39310792fc212d653373e48f2eda47a8255838"
 dependencies = [
  "cc",
  "slop-std-sys",
@@ -3939,9 +3941,9 @@ dependencies = [
 
 [[package]]
 name = "snarl-shacl"
-version = "0.7.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053513c6daa4e3268a34dee3bd3753159b76085a195d5ec0983abc0c65582d99"
+checksum = "fec3155ebb29fb0ba2b032f93a2c2d9078c722ce2394fa73bbc9b71b8e30a7fd"
 dependencies = [
  "cc",
  "slop-rdf-sys",
@@ -3955,7 +3957,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3978,7 +3980,7 @@ dependencies = [
  "memchr",
  "oxrdf",
  "quick-xml",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4000,7 +4002,7 @@ dependencies = [
  "sparesults",
  "spargebra",
  "sparopt",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4013,7 +4015,7 @@ dependencies = [
  "oxrdf",
  "peg",
  "rand 0.9.4",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4387,7 +4389,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5218,7 +5220,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use moose::entity_index::EntityIndexCache;
 use moose::pipeline::execute_graph_walk_nlq_with_context;
 use moose::traits::{EngineConfig, LlmClient};
-use moose::types::{LlmAssistLevel, PipelineTimings};
+use moose::types::{EngineError, LlmAssistLevel, PipelineTimings};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
@@ -89,7 +89,13 @@ async fn execute_query(
         None,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("graph walk failed: {e:?}"))?;
+    .map_err(|e| match e {
+        EngineError::Timeout { budget } => anyhow::anyhow!(
+            "the query was stopped after its {}s time limit; ask a narrower question",
+            budget.as_secs()
+        ),
+        e => anyhow::anyhow!("query failed: {e}"),
+    })?;
 
     let trace = render_trace(&output.timings);
 
