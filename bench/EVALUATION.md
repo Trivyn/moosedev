@@ -1,5 +1,8 @@
 # MOOSEDev — State of the Evidence (consolidated evaluation, 2026-06-23)
 
+> **Addendum 2026-09-25 — in-anger trial closed; cold-arm correction.** See §7 (last bullet), §8, and §11. The
+> benchmark sections below are unchanged and unaffected.
+
 A session-long, multi-instrument evaluation of one question: **does structured (typed-graph) project
 memory beat good free-text / vector memory for a coding agent?** Every instrument is reuse-first,
 pre-registers a strict verdict, grades against primary or source-derived ground truth, and is
@@ -142,6 +145,17 @@ The evaluation repeatedly caught and corrected its *own* errors; that auditabili
 - **The LLM judge caught its own format bug** — it scored B2 0.00 on tasks B2 strict-scored 1.00 (B2 formats sets as fenced "title | IRI" blocks a bullet-extractor misses). The B2-validation check flagged it; the judge now reads the full answer. Lesson `a6529240`.
 - **A dead-MCP bug nearly produced a wrong conclusion.** A `.env` loader I added clobbered `MOOSEDEV_BIN` with an unexpanded `$ROOT`, so the moosedev MCP never launched and *every* B2 agent fell back to grepping the store (0.5–1.2M tokens). This masqueraded as "mem0 wins relevance" / "B2 thrashes" / a weak-model tool-calling gap. With the bin fixed, gpt-5.4-mini calls `get_relevant_context` **4/4 at ~35k tokens** and B2 **ties** mem0 on relevance. The fix also retired the "agent query-competence" story. Lesson `0a890ea9` (supersedes the turf and efficiency claims → `e80db883`, `4d34f8c6`).
 
+- **The in-anger trial's cold control arm was never sealed (found 2026-09-24, at the month-3 readout).** The trial
+  ran `codex exec` with its sandbox bypassed, so the "cold" B0 agent had unrestricted read access; when the stripped tree
+  did not hold a probe's *why*, it walked out of its workdir (`find ..`, `rg /Users/…`) into sibling checkouts carrying the
+  excluded rationale docs, the bench's own task JSON (the gold answers), other cells' transcripts, and in one case a live
+  graph over localhost. 62 of 64 recorded B0 cells escaped; 11 touched their gold. The graph arm (B2) never needed to and
+  was verified firing every month. All 64 cold cells were re-run sealed (macOS seatbelt: workdir + model endpoint only;
+  transcripts escape-audited: 0/64 exposure) against each month's committed tree. The leak had **understated** the graph's
+  advantage by roughly half, and a "code churn" mechanism written for one month's null was pure leakage. Lesson `0ef057d5`;
+  readout in §11. The paper's released benchmark B0 transcripts were audited the same way: 12/36 wandered, **0 reached a
+  gold**, and those B0 cells scored 0 regardless — the paper's numbers are unaffected.
+
 The meta-point: a plausible-but-wrong conclusion almost stuck, and an auditable, re-checkable process caught it —
 which is precisely the failure mode (confident, fluent, wrong) the whole project is betting it can reduce.
 
@@ -150,7 +164,10 @@ which is precisely the failure mode (confident, fluent, wrong) the whole project
 ## 8. Honest scope — what is NOT shown
 
 - **Governance / auditability** (per-claim provenance, supersede-not-overwrite, validation) is MOOSEDev's deepest potential edge over mem0 — but it's **by design, unmeasured**.
-- **Comprehension debt over months** — the *actual reason the project exists* — has **zero evidence**. The capability win is the point-in-time retrieval slice, not the longitudinal payoff.
+- **Comprehension debt over months** — the *actual reason the project exists* — now has *three months of sealed
+  evidence for the capability half and none for the accumulation half* (§11): the graph-vs-cold gap is **large and stable
+  from month 0**, not widening. The frozen probes were reversals already gone from the tree at month 0, so the design could
+  not observe decay (Lesson `eb86844c`); a forward-cohort design is required for the temporal claim.
 - **Conditional on structured capture.** The win requires you to *capture* typed knowledge — friction mem0 doesn't have. On a flat capture, B2 degrades to free-text parity (Lesson `0b2a0f80`).
 - **Single agent family** (codex / gpt-5.x); relevance markers were prior-contaminated (cold B0 0.33–0.80), so the relevance *tie* rests on tool-usage + token parity, not coverage — cleaner project-specific relevance tasks are a follow-up.
 
@@ -176,3 +193,42 @@ evidence that already shows a real, alternative-beating capability.
 - **Graph (source of truth):** capability — Lessons `392855d0`, `6a70b02e`, `243c6c89`, `8a06ad1d`; competitor method — `440abc78`; grading — `a6529240`, `a03dbe13`, `9fc21dc0`; the dead-MCP correction — `0a890ea9`, `e80db883`, `4d34f8c6`; retrieval nulls — `7b41be4f`, `8f06f329`, `410d6c73`. ADs `47f3f038` (bench), `b3205dcb` (ecological arms), `b933bd10` (hybrid), `d3d4d7b1` (in-anger trial). Query via the `moosedev` MCP.
 - **Harness (`bench/`, regrade-safe):** retrieval — `hybrid_*`, `scale_*`, `run_hybrid_ab.sh`, `run_scale_degradation.sh`; capability — `capability_build.py`, `grade_set.py`, `run_capability.sh`; competitor — `mem0_build.py` (mem0 ingests raw docs → on-disk qdrant), `mem0_mcp/server.py`, `regrade_judge.py` (B2-validated LLM judge); config — `config.py`. Currency detail: `RESULTS.md`.
 - **Reproduce:** `$0` probes rerun from the stores with no agent; agentic matrices regrade from logged transcripts; competitor build needs `OPENROUTER_API_KEY` in `.env`, then `mem0_build.py --corpus codegraph --reset` and `CORPUS=codegraph ARMS="B2 B1-notes B1-mem0" ./run_capability.sh`.
+
+---
+
+## 11. In-anger trial readout (2026-06-24 → 2026-09-24, closed) — addendum 2026-09-25
+
+Two production codebases (trivyn, moose), sixteen frozen "why did this change?" probes over supersession reversals, golds from
+primary sources, blind local judge (`google/gemma-4-26b-a4b-qat`), agent frozen at `gpt-5.4-mini` under `codex exec` (routed
+via OpenRouter for month 3 after Codex dropped the model — AD `0ec5839b`). Protocol AD `07415633`, kill Constraint `75b0cf14`.
+
+**Gap = judge(B2 graph) − judge(B0 cold), mean over probes. Cold arm re-measured sealed (§7).**
+
+| month | trivyn: as run (leaky B0) → **sealed** | moose: as run (leaky B0) → **sealed** |
+|---|---|---|
+| Jun (month 0) | +0.10 → **+0.45** | +0.25 → **+0.58** |
+| Jul | +0.40 → **+0.80** | 0.00 → **+0.83** |
+| Aug | +0.35 → **+0.65** | +0.33 → **+0.83** |
+| Sep | +0.30 → **+0.70** | +0.08 → **+0.50** |
+
+- Sealed cold arm: 0.20–0.35 (trivyn) and 0.17–0.42 (moose) every month — it recovers the same 2–4 locally-embodied probes
+  each time and nothing else. Graph arm: trivyn 8/10 in June (two thin captures, enriched later) then 10/10; moose 6/6 except
+  one 0.5 (Jun, Sep). The as-run cold numbers are withdrawn as measurements.
+- **Kill check on its face:** PRIMARY (engagement ≥4 record-citing assists/project/month by end of month 2) passed — Aug 9 & 7;
+  Sep moose 11 fires / 6 misses on 138 commits, Sep trivyn 0 / 2 on 8 commits (a null month; work on trivyn stopped).
+  SECONDARY (non-widening on BOTH projects) not triggered — trivyn widens beyond month 0, moose is flat within judge noise.
+  TRIPWIRE not fired.
+- **What it shows:** a large, stable capability gap from month 0 — typed captured rationale recovers what a sealed cold agent
+  cannot, on both projects, every month. **What it does not show:** the gap opening over time; trivyn's June→July widening is
+  the graph recovering thin captures, not the tree decaying (Lesson `eb86844c`).
+- **Confounds carried:** the leaky control (Lesson `0ef057d5`); working-model drift on the capture side — codex gpt-5.5 →
+  5.6-sol → 6-astra/6-sol, Claude Fable 5 → 5.1 → Opus 5 → 5.5 — unrecorded in provenance (Lesson `59aa666a`; codex records
+  linked motivation at 71% vs Claude 45% on moose, at a third the length); month-3 agent route; September daemon outages.
+- **Capture-side findings** (unchanged by the correction): a tool-description tidy silently collapsed capture and consultation
+  ~8–10× (Lessons `1a4e2761`, `33434cf2`); the metrics caught it; restoration recovered trivyn to ~60% motivated links and
+  exposed a missing-hub workflow on moose (fixed by `approve-spec` hub minting, AD `4514c6ea`).
+- **Verdict (AD `788711c9`):** concept has merit; proceed with v3; next study seeded as Requirement `23be51a0` — sealed arms from
+  day one, forward-cohort probes, a git-history baseline, efficiency as an outcome, small local models in walk mode.
+- **Evidence:** readout Lesson `ecab62b3`; per-cell rows and transcripts under `BENCH_HOME/{trivyn,moose}-trial/runs/` (as run)
+  and `…/cleanB0-2026-09/` (sealed re-run, plus the discarded first attempt), rig under `BENCH_HOME/cleanB0-2026-09-rig/`
+  (`profile3.sb`, `allowproxy.py`, `run_cleanB0.sh`). Private corpora: rows and transcripts stay in `BENCH_HOME`.
