@@ -224,13 +224,15 @@ code under my cursor?"*.
    ```
    declare_component_paths(component: "<exact name or IRI>", paths: ["src/foo/", "src/bar.rs"])
    ```
-   Trailing `/` = directory prefix; no slash = exact file; longest match wins. Idempotent and
+   Trailing `/` = directory prefix; no slash = exact file. A file is governed by every component
+   whose paths contain it; the most specific (longest) match is the one it `realizes`. Idempotent and
    add-only. Skip components with no code home (process/docs components) — do not force paths.
 2. **Mint the skeleton** (operator step, daemon stopped — it holds the store lock; the CLI
    prints the pidfile hint): `moosedev index && moosedev mint` — review the dry-run
    (creates in the expected range, `unmapped paths` should shrink to files you deliberately
    left uncovered) — then `moosedev mint --apply`. Idempotent: a re-run plans nothing.
-   `realizes` edges derive automatically from the coverage you declared in step 1.
+   Dossiers read components from the coverage you declared in step 1; the mint also writes the
+   matching `realizes` edges.
 3. **Link the strongest records to the code they are really about** — for each load-bearing
    Constraint/Decision/Lesson whose subject is a *specific* function, type, or module (not a
    whole component):
@@ -240,7 +242,8 @@ code under my cursor?"*.
    Point at the definition's name token (or pass the SCIP symbol). Private items are minted
    lazily by this call. Misses error honestly — never link a guessed position.
 4. **Spot-check** — `get_entity_dossier` on two or three linked positions: the record appears
-   under **Records**, component knowledge under **Via component …**. An unlinked file must
+   under **Records**, component knowledge under **Via component …**, and knowledge on broader components that also
+   contain the file under **Via enclosing component …**. An unlinked file must
    answer with the no-recorded-knowledge reply (silence is correct, not a failure).
 
 Coverage discipline mirrors record discipline: a handful of precise `link_code` edges on the

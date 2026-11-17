@@ -129,7 +129,8 @@ project knowledge graph. When its tools are available, prefer them over re-deriv
 - **Dossier before editing code** — topic recall depends on choosing good words; a position does not.
   Before modifying a specific function/type/module, call `get_entity_dossier` (file + 1-based
   line/col, SCIP symbol, or entity IRI) on it. Treat any `Constraint` in the result as a hard rule
-  for the edit; `realizes` + the "via component" section tell you whose architectural rules apply.
+  for the edit; `realizes` + the "via component" (and any "via enclosing component") sections
+  tell you whose architectural rules apply.
   The no-recorded-knowledge reply means nothing is linked there — it does not replace topic recall.
 - **Link decisions to the code they govern** — when a captured record is really about a *specific*
   entity (not a whole component), attach it with `link_code(record_iri, predicate, file/line/col |
