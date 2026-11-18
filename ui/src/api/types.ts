@@ -290,6 +290,8 @@ export interface Proposal {
   target_display: string;
   evidence: string | null;
   status: string;
+  /** When the entry was proposed (RFC 3339); a record entry's capture time. */
+  timestamp: string | null;
   /** Superseded record for a proposed high-stakes replacement. */
   predecessor_iri: string | null;
   predecessor_title: string | null;

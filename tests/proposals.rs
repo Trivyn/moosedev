@@ -1036,3 +1036,64 @@ fn rejected_link_creates_no_edge() {
     )
     .is_err());
 }
+
+#[test]
+fn inbox_entries_carry_when_they_were_proposed() {
+    let f = setup("proposals-timestamps");
+    let link_at = chrono::DateTime::parse_from_rfc3339("2026-11-01T09:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let judgment_at = chrono::DateTime::parse_from_rfc3339("2026-11-02T10:45:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    graph::propose_link(
+        &f.state,
+        &f.constraint,
+        "concerns",
+        ALPHA_RAW,
+        "src/foo/a.rs",
+        "cited in prose",
+        "tester",
+        link_at,
+    )
+    .unwrap();
+    graph::propose_judgment(
+        &f.state,
+        &f.beta,
+        "playsRole",
+        &graph::role_iri("boundary"),
+        0.75,
+        graph::AUTO_HELD,
+        "R2 boundary",
+        "moosedev-classifier",
+        judgment_at,
+    )
+    .unwrap();
+    let record = record_with_status(&f.state, "Lesson", "pending lesson", "proposed");
+
+    let pending = graph::list_proposals(&f.state, Some("proposed")).unwrap();
+    let timestamp_of = |kind: graph::ProposalKind| {
+        pending
+            .iter()
+            .find(|p| p.kind == kind)
+            .and_then(|p| p.timestamp.clone())
+            .unwrap_or_else(|| panic!("{kind:?} entry has no timestamp"))
+    };
+    let instant = |ts: &str| {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap_or_else(|e| panic!("{ts:?} is not RFC 3339: {e}"))
+            .with_timezone(&Utc)
+    };
+    assert_eq!(instant(&timestamp_of(graph::ProposalKind::Link)), link_at);
+    assert_eq!(
+        instant(&timestamp_of(graph::ProposalKind::Judgment)),
+        judgment_at
+    );
+    // A proposed record's entry time is its own capture time.
+    let record_ts = timestamp_of(graph::ProposalKind::Record);
+    instant(&record_ts);
+    assert_eq!(
+        Some(record_ts),
+        literal_value(&f.state, &record, &f.state.capture.timestamp)
+    );
+}

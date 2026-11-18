@@ -217,6 +217,8 @@ pub struct ProposalDto {
     pub target_display: String,
     pub evidence: Option<String>,
     pub status: String,
+    /// When the entry was proposed (RFC 3339).
+    pub timestamp: Option<String>,
     pub predecessor_iri: Option<String>,
     pub predecessor_title: Option<String>,
     pub supersession_reason: Option<String>,
