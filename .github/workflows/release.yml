@@ -28,7 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14                       # Apple Silicon runner (arm64)
+          - os: macos-15                       # Apple Silicon runner (arm64); macos-14 retired 2026-11-02
             target: aarch64-apple-darwin
             cargo_flags: "--features metal"   # GPU embeddings (Arctic-Embed-S) via candle Metal backend
             rustflags: ""
