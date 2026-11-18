@@ -120,6 +120,9 @@ pub struct ProposalSummary {
     pub target_display: String,
     pub evidence: Option<String>,
     pub status: String,
+    /// When the entry was proposed (RFC 3339, as stored). For `Record` entries
+    /// this is the record's own capture time.
+    pub timestamp: Option<String>,
     /// Superseded record for a proposed high-stakes replacement.
     pub predecessor_iri: Option<String>,
     pub predecessor_title: Option<String>,
@@ -512,6 +515,7 @@ fn scan_link_proposals(
             target_display,
             evidence: first_literal(&state.store, &iri, &state.capture.description),
             status,
+            timestamp: first_literal(&state.store, &iri, &state.capture.timestamp),
             predecessor_iri: None,
             predecessor_title: None,
             supersession_reason: None,
@@ -638,6 +642,7 @@ fn scan_record_proposals(state: &AppState) -> anyhow::Result<Vec<ProposalSummary
             target_display: String::new(),
             evidence: first_literal(&state.store, &iri, &state.capture.description),
             status: PROPOSED.to_string(),
+            timestamp: first_literal(&state.store, &iri, &state.capture.timestamp),
             predecessor_iri,
             predecessor_title,
             supersession_reason,

@@ -50,6 +50,7 @@ pub async fn list_proposals(
                 target_display: p.target_display,
                 evidence: p.evidence,
                 status: p.status,
+                timestamp: p.timestamp,
                 predecessor_iri: p.predecessor_iri,
                 predecessor_title: p.predecessor_title,
                 supersession_reason: p.supersession_reason,

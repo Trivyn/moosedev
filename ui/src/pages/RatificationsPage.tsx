@@ -34,6 +34,22 @@ function localName(iri: string): string {
   return iri.slice(Math.max(iri.lastIndexOf('/'), iri.lastIndexOf('#')) + 1) || iri;
 }
 
+/** When an inbox item was proposed: compact local time, the stored value on hover. */
+function ProposedAt({ timestamp }: { timestamp: string | null }) {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  const shown = Number.isNaN(date.valueOf())
+    ? timestamp
+    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return (
+    <Tooltip title={`Proposed ${timestamp}`}>
+      <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+        {shown}
+      </Typography>
+    </Tooltip>
+  );
+}
+
 /** Taxonomy targets per judgment axis, for the recategorize control. */
 const ROLE_TARGETS = [
   'core-algorithm',
@@ -200,6 +216,8 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
                   <Chip size="small" color="secondary" label={proposal.record_class ?? 'Record'} />
                   <Typography variant="subtitle2">{proposal.label}</Typography>
+                  <Box sx={{ flexGrow: 1 }} />
+                  <ProposedAt timestamp={proposal.timestamp} />
                 </Stack>
                 {proposal.evidence && (
                   <Typography
@@ -365,6 +383,7 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                           {link.evidence}
                         </Typography>
                       </Tooltip>
+                      <ProposedAt timestamp={link.timestamp} />
                       <Button
                         size="small"
                         disabled={busy !== null}
@@ -477,6 +496,7 @@ export default function RatificationsPage({ onNavigateRecord }: RatificationsPag
                               {judgment.evidence ?? judgment.label} ({judgment.confidence ?? '?'})
                             </Typography>
                           </Tooltip>
+                          <ProposedAt timestamp={judgment.timestamp} />
                           <Button
                             size="small"
                             disabled={busy !== null}
