@@ -14,10 +14,10 @@ dumping project history into the model context.
 
 | Tool | Purpose |
 | --- | --- |
-| `get_relevant_context` | Retrieve current project knowledge by topic, or omit the topic for a broad inventory. History is opt-in. |
-| `query` | Ask one focused natural-language question and receive an answer with a symbolic reasoning trace. |
-| `sparql` | Run a read-only SPARQL query on MOOSE's bounded engine. `SELECT` and `ASK` return JSON; `CONSTRUCT` and `DESCRIBE` return N-Triples. The default graph is the union of the project, provenance, ontology and shape graphs. Name a graph with `GRAPH <iri> { … }`, because `FROM`, `SERVICE` and updates are rejected. Results stop at 1000 rows (marked `truncated`) and 10 seconds. An empty result from a query that uses unknown terms comes with a note suggesting the terms in use. |
-| `get_entity_dossier` | Retrieve the decisions, constraints, lessons, judgments, and observations that govern one code entity. Directly linked records carry their complete claims; component records are listed by title. |
+| `get_relevant_context` | Retrieve current project knowledge by topic, or omit the topic for a broad inventory. History is opt-in: a Rationale that only explains retired records is left out unless `include_history` is set. |
+| `query` | Ask one focused natural-language question and receive an answer with a symbolic reasoning trace. Answers name properties by their ontology labels. A question the graph cannot answer as asked gets a clarifying question or a refusal instead of a guess, and a question that runs longer than 120 seconds is stopped with a timeout error; ask a narrower one. |
+| `sparql` | Run a read-only SPARQL query. `SELECT` and `ASK` return JSON; `CONSTRUCT` and `DESCRIBE` return N-Triples. The default graph is the union of the project, provenance, ontology and shape graphs. Name a graph with `GRAPH <iri> { … }` or range over them with `GRAPH ?g { … }`, because `FROM`, `FROM NAMED`, `SERVICE` and updates are rejected. The tool description lists each ontology's term namespace, so prefixes can be copied rather than written from memory. Results stop at 1000 rows (marked `truncated`) and 10 seconds. An empty result from a query that uses unknown terms comes with a note suggesting the terms in use. |
+| `get_entity_dossier` | Retrieve the decisions, constraints, lessons, judgments, and observations that govern one code entity. Directly linked records carry their complete claims; component records are listed by title. Components come from the file's path, most specific first: rules on a directory or whole-project component reach every file inside it. |
 | `get_provenance` | Find which agent recorded an item and when. |
 
 For ordinary recall, start with `get_relevant_context`, move to `query` when
@@ -30,7 +30,7 @@ relationships need synthesis, and use `sparql` for exact or exhaustive reads.
 | `record_important_decision` | Record a typed decision, lesson, constraint, pattern, anti-pattern, or requirement. |
 | `supersede_decision` | Replace a record while preserving the prior version and the rationale for the change. |
 | `retract_decision` | Deprecate a record that no longer applies and has no replacement. |
-| `relate` | Add an ontology-legal relationship between existing records. |
+| `relate` | Add an ontology-legal relationship between existing records. `supersedes` is accepted only from a `proposed` record and `isSupersededBy` never; use `supersede_decision` to replace a record. |
 | `link_code` | Link a record to a code entity by source position or stable symbol. |
 | `declare_component_paths` | Map repository paths to an existing system component. |
 
@@ -47,7 +47,7 @@ duplicates or delete historical knowledge.
 | `evaluate_policy` | Evaluate a host event through the shared symbolic push, gate, and capture policy. An `entity_touched` push accepts `max_bytes`: the first entity section is always whole, and a later section that does not fit is shortened, never omitted, to its direct records with their claims and its component's accepted Constraint titles; a closing line names the shortened entities. Because that core always renders, the result can exceed the bound, so hosts with a hard cap cut at a line boundary and append an explicit truncation notice. |
 | `capture_decision_point` | Create a grounded proposed decision and queue its code links for review. |
 | `pending_ratifications` | List proposed records and links waiting for human review. |
-| `validate_against_architecture` | Validate recorded knowledge against the architecture SHACL shapes. |
+| `validate_against_architecture` | Validate recorded knowledge against the architecture SHACL shapes. Also reports a record retired by a `supersedes` edge whose status was never flipped (a pending proposed supersession is exempt), and warns, without failing, about component paths that match no file. |
 
 ### Operations
 
@@ -126,11 +126,14 @@ set.
 The daemon also hosts the Knowledge-LSP and, by default, a web workbench on an
 ephemeral loopback port. Use `moosedev --status` to inspect the backend or
 `moosedev ui` to open the workbench. `moosedev --serve --open` starts the daemon
-and opens the workbench when ready.
+and opens the workbench when ready. A workbench chat turn that runs longer than
+120 seconds is stopped with HTTP 504; ask a narrower question.
 
 ## Code indexing
 
-The code layer supports Rust, TypeScript, and Python through SCIP producers.
+The code layer supports Rust, TypeScript, and Python through SCIP producers. A
+Python project without a manifest is still indexed when a directory at the
+repository root holds `__init__.py`.
 Build the substrate, preview graph changes, then apply the ones you want:
 
 ```sh

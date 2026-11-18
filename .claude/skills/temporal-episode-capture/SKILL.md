@@ -92,8 +92,9 @@ about code that no longer exists. Two per-episode rules and two operator steps k
 **Per episode:**
 - When you mint a `SystemComponent`, declare the paths it owns **now**:
   `declare_component_paths(component, paths)` (trailing `/` = directory prefix, otherwise an
-  exact file). Coverage accumulates across the walk; `realizes` edges derive from it in the
-  post-walk mint.
+  exact file). Coverage accumulates across the walk and takes effect at once: a dossier reads a file's
+  components from the declared coverage, so a component declared mid-walk governs its files
+  immediately.
 - When a record's subject is a *specific* function/type/module that **still exists at HEAD**,
   link it: `link_code(record_iri, predicate, symbol | file/line/col)`. **Never take positions
   from the historical diff** — they are positions in an old revision. Use a SCIP symbol, or
@@ -105,7 +106,7 @@ about code that no longer exists. Two per-episode rules and two operator steps k
 - *Pre-walk:* `moosedev index && moosedev mint --apply` (daemon stopped — it holds the store
   lock) so the HEAD skeleton exists before episode 1; episodes can then link against it.
 - *Post-walk:* re-run `moosedev mint --apply` — entities minted before components existed pick
-  up their `realizes` edges from the coverage declared during the walk (idempotent update pass).
+  up the `realizes` edges that `sparql` reads (idempotent update pass). Dossiers do not need it.
 
 ---
 

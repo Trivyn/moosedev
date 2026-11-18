@@ -167,7 +167,7 @@ different markdown, status, and verification rules.
 1. `ping` → `pong`. If it fails, the backend isn't attached — fix wiring before continuing.
 2. **Count decisions across all lifecycle statuses** with `sparql`:
    ```sparql
-   PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
+   PREFIX : <https://trivyn.io/ontologies/software/architecture#>
    SELECT (COUNT(?ad) AS ?n) WHERE {
      GRAPH <https://moosedev.dev/kg/project> { ?ad a :ArchitecturalDecision . }
    }
@@ -180,7 +180,7 @@ different markdown, status, and verification rules.
 ### Phase 1 — Enumerate & number (the stable ordering)
 
 ```sparql
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
+PREFIX : <https://trivyn.io/ontologies/software/architecture#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 SELECT ?ad ?title ?status ?ts ?author WHERE {
   GRAPH <https://moosedev.dev/kg/project> {
@@ -217,7 +217,7 @@ Fetch one batch with a `VALUES`-scoped query (it also returns each decision's **
 description as a `self` row — the Decision lead line):
 
 ```sparql
-PREFIX : <https://trivyn.io/ontologies/software/architecture/domain/>
+PREFIX : <https://trivyn.io/ontologies/software/architecture#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 SELECT ?ad ?dir ?rel ?node ?nlabel ?ndesc WHERE {
   GRAPH <https://moosedev.dev/kg/project> {

@@ -72,7 +72,7 @@ covers project setup and enabling the code layer + editor integration
 Source builds require Rust 1.89 or newer, Node.js 20, and access to the private MOOSE engine.
 Check out MOOSE as a sibling at `../moose`; MOOSEDev uses it as a path dependency
 and shares its patched `oxigraph` fork. The release workflow currently pins MOOSE
-commit `3add7b4ce81bcea114d899351210dd0f46448e1e` (`v0.19.1`). Use that revision to
+commit `553b63c109606d11eb7cce2c6d82d438d8827db3` (`v0.29.0`). Use that revision to
 reproduce release builds.
 
 ```sh
