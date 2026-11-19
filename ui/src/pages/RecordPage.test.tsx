@@ -453,4 +453,26 @@ describe('RecordPage CodeEntity workbench', () => {
     expect(await screen.findByText('Keep local operation')).toBeInTheDocument();
     expect(screen.queryByText('Code')).not.toBeInTheDocument();
   });
+
+  it('accepts a proposed record in place and reloads it with its new status', async () => {
+    let status = 'proposed';
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/v1/proposals/record-1/accept' && init?.method === 'POST') {
+        status = 'accepted';
+        return { ok: true, json: async () => ({ id: 'record-1', status: 'accepted' }) };
+      }
+      if (url.startsWith('/api/v1/proposals')) {
+        return { ok: true, json: async () => ({ proposals: [] }) };
+      }
+      return { ok: true, json: async () => ({ ...response, status }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<RecordPage uuid="record-1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }));
+
+    expect(await screen.findByText(/^accepted ·/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument();
+  });
 });
+

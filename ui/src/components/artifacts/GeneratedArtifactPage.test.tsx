@@ -2,7 +2,16 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { api } from '../../api/client';
 import GeneratedArtifactPage, { ArtifactSummaryBase } from './GeneratedArtifactPage';
+
+vi.mock('../../api/client', () => ({
+  api: {
+    listProposals: vi.fn(async () => ({ proposals: [] })),
+    acceptProposal: vi.fn(async () => ({ id: '', status: 'accepted', entity_iri: null, entity_name: null })),
+    rejectProposal: vi.fn(),
+  },
+}));
 
 vi.mock('../graph/RecordNeighborhoodGraph', () => ({
   default: ({
@@ -258,4 +267,51 @@ describe('GeneratedArtifactPage direct links', () => {
       iri: `https://moosedev.dev/kg/${recordKind}/new-id`,
     });
   });
+
+  it('ratifies a proposed record from its view and reloads list and detail', async () => {
+    let status = 'Proposed';
+    const loadList = vi.fn(async () => ({
+      records: records.map((record) => (record.num === '0002' ? { ...record, status } : record)),
+    }));
+    const loadDetail = vi.fn(async (num: string) => ({
+      summary: { ...records.find((record) => record.num === num)!, status },
+      markdown: `Detail ${num} (${status})`,
+    }));
+    vi.mocked(api.acceptProposal).mockImplementation(async (id: string) => {
+      status = 'Accepted';
+      return { id, status: 'accepted', entity_iri: null, entity_name: null };
+    });
+
+    render(
+      <GeneratedArtifactPage<ArtifactSummaryBase, TestList, null>
+        targetUuid="adr-2"
+        artifactKind="adrs"
+        title="ADRs"
+        emptyText="Empty"
+        selectText="Select"
+        refreshTooltip="Refresh"
+        downloadTooltip="Download"
+        archiveFilename="records.zip"
+        sidebarMinWidth={300}
+        sidebarMaxWidth={500}
+        loadList={loadList}
+        loadDetail={loadDetail}
+        downloadArchive={async () => new Blob()}
+        recordsOf={(list) => list.records}
+        generatedFileCount={(list) => list.records.length}
+        warningsOf={() => null}
+        warningCount={() => 0}
+        renderWarningSummary={() => null}
+      />,
+    );
+
+    expect(await screen.findByText('Detail 0002 (Proposed)')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }));
+
+    expect(await screen.findByText('Detail 0002 (Accepted)')).toBeInTheDocument();
+    expect(api.acceptProposal).toHaveBeenCalledWith('adr-2');
+    expect(loadList).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument();
+  });
 });
+
