@@ -17,6 +17,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import LinkedMarkdown, { ArtifactTarget } from './LinkedMarkdown';
 import RecordNeighborhoodGraph from '../graph/RecordNeighborhoodGraph';
+import RatifyActions from '../ratification/RatifyActions';
 
 export type ArtifactStatusColor = 'default' | 'primary' | 'success' | 'warning';
 
@@ -183,6 +184,8 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  // Bumped after accept/reject so the open record's rendering reloads.
+  const [detailReloads, setDetailReloads] = useState(0);
 
   const records = useMemo(() => (list ? recordsOf(list) : []), [list, recordsOf]);
   const artifactTargetsByHref = useMemo(
@@ -301,7 +304,7 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
     return () => {
       cancelled = true;
     };
-  }, [selectedNum]);
+  }, [selectedNum, detailReloads]);
 
   const warnings = list ? warningsOf(list) : null;
 
@@ -421,6 +424,17 @@ export default function GeneratedArtifactPage<TSummary extends ArtifactSummaryBa
               >
                 {selectedFromList.date} - {selectedFromList.author} - {selectedFromList.iri}
               </Typography>
+              <Box sx={{ mt: 1, '&:empty': { display: 'none' } }}>
+                <RatifyActions
+                  uuid={recordUuid(selectedFromList)}
+                  status={selectedFromList.status}
+                  onRatified={() => {
+                    refreshList();
+                    setDetailReloads((n) => n + 1);
+                  }}
+                  onNavigateRecord={onNavigateRecord}
+                />
+              </Box>
             </Box>
             <Divider />
           </>

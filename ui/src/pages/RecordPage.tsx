@@ -15,6 +15,7 @@ import { RecordDetailResponse } from '../api/types';
 import LinkedMarkdown, { artifactTargetForIri, ArtifactTarget } from '../components/artifacts/LinkedMarkdown';
 import CodeEntityPanel from '../components/code/CodeEntityPanel';
 import RecordNeighborhoodGraph from '../components/graph/RecordNeighborhoodGraph';
+import RatifyActions from '../components/ratification/RatifyActions';
 
 interface RecordPageProps {
   uuid: string;
@@ -49,6 +50,8 @@ export default function RecordPage({
 }: RecordPageProps) {
   const [record, setRecord] = useState<RecordDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Bumped after accept/reject so the record reloads with its new status.
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -78,7 +81,7 @@ export default function RecordPage({
     return () => {
       cancelled = true;
     };
-  }, [uuid, onNavigateArtifact, onResolveArtifact, resolveArtifacts]);
+  }, [uuid, onNavigateArtifact, onResolveArtifact, resolveArtifacts, reloads]);
 
   if (error) {
     return (
@@ -119,6 +122,13 @@ export default function RecordPage({
             </Typography>
           )}
         </Box>
+
+        <RatifyActions
+          uuid={uuid}
+          status={record.status}
+          onRatified={() => setReloads((n) => n + 1)}
+          onNavigateRecord={onNavigateRecord}
+        />
 
         {record.code && <CodeEntityPanel uuid={uuid} code={record.code} />}
 
