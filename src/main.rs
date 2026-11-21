@@ -975,6 +975,21 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
         "  output:      {}",
         substrate::substrate_dir(data_dir).display()
     );
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    // A failed producer is excluded and the rest of the index is still
+    // published, so this exits 0 — but the dropped language must be impossible
+    // to miss at the end of the output.
+    if !report.excluded.is_empty() {
+        eprintln!(
+            "\nNOT INDEXED: {} of {} producer(s) failed and were excluded: {}. Code they cover is missing from the substrate; see {}",
+            report.excluded.len(),
+            report.excluded.len() + report.producers.len(),
+            report.excluded.join(", "),
+            substrate::index_log_path(data_dir).display()
+        );
+    }
     Ok(())
 }
 

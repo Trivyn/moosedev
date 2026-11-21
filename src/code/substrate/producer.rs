@@ -13,7 +13,9 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
+use protobuf::Message;
 
+use super::encoding::transcode_to_utf8;
 use super::meta::{sync_directory, ProducerRun, SubstrateMeta, CURRENT_SCHEMA_VERSION};
 use super::scip::{ingest, producer_info, read_index};
 use super::{
@@ -71,7 +73,11 @@ pub struct IndexReport {
     pub producers: Vec<ProducerReport>,
     /// Files covered by the churn sidecar, when extraction succeeded.
     pub churn_files: Option<usize>,
-    /// Producer failures excluded from the completed substrate.
+    /// Producers that were detected but failed, so their languages are absent
+    /// from the published substrate. Each also has an entry in `warnings`.
+    pub excluded: Vec<String>,
+    /// Producer failures excluded from the completed substrate, and other
+    /// non-fatal problems (churn sidecar, cleanup).
     pub warnings: Vec<String>,
 }
 
@@ -137,6 +143,7 @@ pub fn run_index_with(
     let mut runs = Vec::new();
     let mut reports = Vec::new();
     let mut warnings = Vec::new();
+    let mut excluded = Vec::new();
     for (spec, target) in detected {
         write_log_header(data_dir, spec.name)?;
         match run_producer(spec, &target, data_dir, &artifact_root) {
@@ -144,12 +151,15 @@ pub fn run_index_with(
                 runs.push(run);
                 reports.push(report);
             }
-            Err(error) => warnings.push(exclude_failed_producer(
-                spec,
-                data_dir,
-                &artifact_root,
-                &error,
-            )?),
+            Err(error) => {
+                excluded.push(spec.name.to_string());
+                warnings.push(exclude_failed_producer(
+                    spec,
+                    data_dir,
+                    &artifact_root,
+                    &error,
+                )?);
+            }
         }
     }
 
@@ -208,6 +218,7 @@ pub fn run_index_with(
         index_bytes: reports.iter().map(|report| report.index_bytes).sum(),
         producers: reports,
         churn_files,
+        excluded,
         warnings,
     })
 }
@@ -248,12 +259,35 @@ fn run_producer(
         return Err(producer_failure(&program, status, data_dir));
     }
 
-    let index = read_index(&tmp_path).with_context(|| {
+    let mut index = read_index(&tmp_path).with_context(|| {
         format!(
             "SCIP producer wrote invalid index {}; run `moosedev index` again",
             tmp_path.display()
         )
     })?;
+    // The substrate stores UTF-8 byte columns. A producer that counts in UTF-16
+    // or UTF-32 (scip-typescript) is converted here, while its sources are on
+    // disk, and the converted index is what gets promoted.
+    let converted = transcode_to_utf8(&mut index, &target.project_dir)
+        .context("SCIP producer positions could not be converted to UTF-8")?;
+    if converted > 0 {
+        let bytes = index
+            .write_to_bytes()
+            .context("failed to serialize the UTF-8 SCIP index")?;
+        fs::write(&tmp_path, bytes).with_context(|| {
+            format!(
+                "failed to rewrite temporary SCIP index {}",
+                tmp_path.display()
+            )
+        })?;
+        append_log_line(
+            data_dir,
+            &format!(
+                "converted {converted} {} document(s) to UTF-8 positions",
+                spec.name
+            ),
+        )?;
+    }
     let ingested = ingest(&index).context("SCIP producer output failed substrate validation")?;
     let (producer, producer_version) = producer_info(&index);
     let index_bytes = fs::metadata(&tmp_path)
@@ -792,6 +826,59 @@ mod tests {
         let _ = fs::remove_dir_all(data_dir);
     }
 
+    /// scip-typescript 0.6+ declares UTF-16 positions. The producer is kept:
+    /// its index is converted to UTF-8 byte columns against the sources on disk
+    /// and the converted index is what gets promoted (#60).
+    #[test]
+    fn utf16_producer_output_is_converted_and_promoted() {
+        let repo_root = unique_temp_dir("utf16-producer-repo");
+        let data_dir = unique_temp_dir("utf16-producer-data");
+        fs::create_dir_all(repo_root.join("src")).unwrap();
+        // `é` is 1 UTF-16 unit but 2 UTF-8 bytes, so `x` moves from column 7 to 8.
+        fs::write(repo_root.join("src/a.ts"), "let é, x;\n").unwrap();
+        let mut index = Index::new();
+        let mut document = Document::new();
+        document.relative_path = "src/a.ts".to_string();
+        document.position_encoding =
+            EnumOrUnknown::new(PositionEncoding::UTF16CodeUnitOffsetFromLineStart);
+        let mut occurrence = Occurrence::new();
+        occurrence.symbol = "scip-typescript npm ui . src/`a.ts`/x.".to_string();
+        occurrence.range = vec![0, 7, 8];
+        occurrence.symbol_roles = 1;
+        document.occurrences.push(occurrence);
+        index.documents.push(document);
+        fs::write(
+            repo_root.join("first.scip"),
+            index.write_to_bytes().unwrap(),
+        )
+        .unwrap();
+        let specs = [ProducerSpec {
+            name: "first",
+            detect: detect_all,
+            command: copy_first,
+            extensions: &["ts"],
+        }];
+
+        let report = run_index_with(&specs, &repo_root, &data_dir).unwrap();
+
+        assert!(report.excluded.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.producers.len(), 1);
+        let meta = SubstrateMeta::load(&data_dir).unwrap();
+        let artifact_root = meta.artifact_root(&data_dir).unwrap();
+        let promoted = read_index(&producer_index_path_in(&artifact_root, "first")).unwrap();
+        let document = &promoted.documents[0];
+        assert_eq!(
+            document.position_encoding.enum_value(),
+            Ok(PositionEncoding::UTF8CodeUnitOffsetFromLineStart)
+        );
+        assert_eq!(document.occurrences[0].range, vec![0, 8, 9]);
+        let log = fs::read_to_string(index_log_path(&data_dir)).unwrap();
+        assert!(log.contains("converted 1 first document(s) to UTF-8 positions"));
+
+        let _ = fs::remove_dir_all(repo_root);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
     #[test]
     fn failed_producer_is_removed_and_successful_one_completes() {
         let repo_root = unique_temp_dir("partial-producer-repo");
@@ -817,6 +904,7 @@ mod tests {
 
         let report = run_index_with(&specs, &repo_root, &data_dir).unwrap();
         assert_eq!(report.producers.len(), 1);
+        assert_eq!(report.excluded, vec!["failed"]);
         assert_eq!(
             report
                 .warnings

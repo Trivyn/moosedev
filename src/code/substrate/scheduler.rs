@@ -196,6 +196,12 @@ pub fn spawn_save_reindex(repo_root: PathBuf, data_dir: PathBuf) -> Option<Reind
     });
     let runner: IndexRunner = Box::new(move || {
         let report = run_index(&repo_root, &data_dir)?;
+        if !report.excluded.is_empty() {
+            tracing::warn!(
+                excluded = ?report.excluded,
+                "save-triggered substrate rebuild excluded failed producers; their languages are not indexed (see the index log)"
+            );
+        }
         tracing::info!(
             commit = %report.commit,
             duration_s = report.duration.as_secs_f64(),
