@@ -9,6 +9,7 @@
 //! The graph implementation is split by responsibility below, but this module
 //! re-exports each submodule so the public `crate::graph::*` API remains stable.
 
+pub mod authoritative;
 pub mod capture;
 pub mod classify;
 pub mod code_entities;
