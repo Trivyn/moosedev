@@ -257,9 +257,11 @@ trivyn:confidence a owl:AnnotationProperty ;
     rdfs:label "hasRationale" ;
     rdfs:range :Rationale ;
     rdfs:subPropertyOf obo:BFO_0000176 {| trivyn:confidence "0.70"^^xsd:decimal ; trivyn:parentLabel "continuant part of" ; trivyn:rrfRank "2"^^xsd:integer ; skos:historyNote "Aligned to continuant part of via embedding similarity" ; dcterms:created "2026-06-17T15:28:08Z"^^xsd:dateTime |};
-    skos:definition "Relates an architectural decision to its underlying reasoning.";
+    skos:definition "Relates an information record, or a system component whose retirement or merge it explains, to its underlying reasoning.";
     skos:altLabel "has rationale";
-    rdfs:domain :InformationRecord.
+    skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." ;
+    rdfs:domain :InformationRecord ;
+    dcam:domainIncludes :SystemComponent.
 :weighs a owl:ObjectProperty ;
     rdfs:label "weighs" ;
     rdfs:domain :ArchitecturalDecision ;
@@ -276,10 +278,13 @@ trivyn:confidence a owl:AnnotationProperty ;
 :supersedes a owl:ObjectProperty ;
     rdfs:label "supersedes" ;
     rdfs:subPropertyOf prov:wasRevisionOf ;
-    skos:definition "Relates an architectural decision to the one it replaces.";
+    skos:definition "Relates an information record to the one it replaces, or a system component to a component merged into it.";
     skos:historyNote "Aligned to prov:wasRevisionOf 2026-09-12 (interoperability only; approved by the maintainer with :restates and :refines)." ;
-    rdfs:domain :InformationRecord;
-    rdfs:range :InformationRecord.
+    skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." ;
+    rdfs:domain :InformationRecord ;
+    rdfs:range :InformationRecord ;
+    dcam:domainIncludes :SystemComponent ;
+    dcam:rangeIncludes :SystemComponent.
 
 :restates a owl:ObjectProperty, owl:SymmetricProperty ;
     rdfs:label "restates" ;
@@ -332,7 +337,9 @@ trivyn:confidence a owl:AnnotationProperty ;
       owl:inverseOf :hasRationale ;
       rdfs:domain :Rationale ;
       rdfs:range :InformationRecord ;
-      skos:definition "Relates a rationale to the information record whose reasoning it provides." ;
+      dcam:rangeIncludes :SystemComponent ;
+      skos:definition "Relates a rationale to the information record whose reasoning it provides, or to the system component whose retirement or merge it explains." ;
+      skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." ;
       skos:altLabel "justifies" .
 
 :isWeighedBy a owl:ObjectProperty ;
@@ -356,7 +363,10 @@ trivyn:confidence a owl:AnnotationProperty ;
       owl:inverseOf :supersedes ;
       rdfs:domain :InformationRecord ;
       rdfs:range :InformationRecord ;
-      skos:definition "Relates an information record to the record that replaces it." .
+      dcam:domainIncludes :SystemComponent ;
+      dcam:rangeIncludes :SystemComponent ;
+      skos:definition "Relates an information record to the record that replaces it, or a system component to the component it was merged into." ;
+      skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." .
 
 :isConstrainedBy a owl:ObjectProperty ;
       rdfs:label "is constrained by" ;

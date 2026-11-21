@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 
 use crate::provenance;
 
-use super::capture::{record_instance_with_relation_args, RecordInput};
+use super::capture::{record_instance_with_relation_args_unlocked, RecordInput};
 use super::proposals::propose_link_unlocked;
 use super::state::AppState;
 
@@ -109,7 +109,8 @@ pub fn capture_decision_point(
     // section. A concurrent accept/reject cannot observe the record before its
     // complete link set has been enqueued.
     let _proposal_guard = state.lock_proposal_writes()?;
-    let outcome = record_instance_with_relation_args(state, &input, &relations, author, when)?;
+    let outcome =
+        record_instance_with_relation_args_unlocked(state, &input, &relations, author, when)?;
 
     if let Err(e) = provenance::record_provenance(&state.store, &outcome.iri, author) {
         tracing::warn!(

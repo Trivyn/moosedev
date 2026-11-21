@@ -749,7 +749,7 @@ pub(crate) fn resolve_target_entity(
     }
 }
 
-/// Return the first component reached by `realizes`, with a display label.
+/// Return the first current component reached by `realizes`, with a display label.
 fn first_realized_component(
     state: &AppState,
     terms: &CodeTerms,
@@ -769,6 +769,10 @@ fn first_realized_component(
             continue;
         };
         let iri = component.as_str().to_string();
+        // A retired component governs nothing, whatever an entity realized once.
+        if super::components::is_retired_component(state, &iri) {
+            continue;
+        }
         let label = first_literal(&state.store, &iri, moose::RDFS_LABEL)
             .unwrap_or_else(|| local_name(&iri).to_string());
         return Ok(Some((iri, label)));

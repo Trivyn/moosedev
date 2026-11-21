@@ -136,7 +136,22 @@ pub struct RecordOutcome {
 /// behind (validation precedes the single `assert_instance`). `target` is an
 /// existing record IRI or its exact (normalized) title; an ambiguous title is
 /// rejected (Req 5565038e). Identical `(predicate, object)` pairs are deduped.
+///
+/// Holds the proposal-write lock from target resolution through the write, so
+/// a component retired or merged in between cannot receive the new edge.
 pub fn record_instance_with_relation_args(
+    state: &AppState,
+    input: &RecordInput,
+    relations: &[(String, String)],
+    author: &str,
+    when: DateTime<Utc>,
+) -> anyhow::Result<RecordOutcome> {
+    let _guard = state.lock_proposal_writes()?;
+    record_instance_with_relation_args_unlocked(state, input, relations, author, when)
+}
+
+/// Caller holds `AppState::lock_proposal_writes` across relation validation and the write.
+pub(crate) fn record_instance_with_relation_args_unlocked(
     state: &AppState,
     input: &RecordInput,
     relations: &[(String, String)],
@@ -148,12 +163,20 @@ pub fn record_instance_with_relation_args(
     Ok(RecordOutcome { iri, applied_edges })
 }
 
+/// Resolve and validate inline relations for a record about to be written.
+/// Caller holds `AppState::lock_proposal_writes` from here through the write,
+/// so a validated target cannot be retired before the edge lands.
 pub(crate) fn plan_relation_args(
     state: &AppState,
     input: &RecordInput,
     relations: &[(String, String)],
 ) -> anyhow::Result<(PlannedObjectProps, PlannedEdges)> {
     let subject_types = std::slice::from_ref(&input.class_iri);
+    let supplied_status = input
+        .properties
+        .iter()
+        .find(|(predicate, _)| predicate == &state.capture.status)
+        .map(|(_, status)| status.as_str());
     let mut object_props: Vec<(String, String)> = Vec::new();
     let mut applied_edges: Vec<AppliedEdge> = Vec::new();
 
@@ -163,22 +186,32 @@ pub(crate) fn plan_relation_args(
                 "unknown relationship {predicate_local:?} (not an object property in the architecture ontology): {e}"
             )
         })?;
-        // The same lifecycle rule relate enforces, against the status this record is
-        // being captured WITH — the subject does not exist yet to be read. Capture is
-        // the second write path that could plant a supersedes edge nothing will flip;
-        // supersede_decision's own inline relations already refuse it outright
-        // (`reject_managed_relation_args`), but this path had no guard at all.
-        super::lifecycle::guard_supersession_edge(
-            predicate_local,
-            input
-                .properties
-                .iter()
-                .find(|(predicate, _)| predicate == &state.capture.status)
-                .map(|(_, status)| status.as_str()),
-        )?;
         let object_iri = resolve_relation_target(state, target, &predicate_iri)?;
         let object = NamedNode::new(&object_iri)
             .map_err(|e| anyhow::anyhow!("invalid target IRI {object_iri:?}: {e}"))?;
+        // The same lifecycle rules relate enforces, against the status this record is
+        // being captured WITH — the subject does not exist yet to be read. Capture is
+        // the second write path that could plant a supersedes edge nothing will flip;
+        // supersede_decision's own inline relations already refuse it outright
+        // (`reject_managed_relation_args`), but this path had no guard at all. The
+        // target is resolved first so a component at either end is refused with
+        // the component rule rather than the record one.
+        super::lifecycle::guard_component_lifecycle_edge(
+            state,
+            &predicate_iri,
+            subject_types,
+            &asserted_project_types(state, &object),
+        )?;
+        super::lifecycle::guard_supersession_edge(predicate_local, supplied_status)?;
+        super::components::guard_retired_component_endpoint(
+            state,
+            &predicate_iri,
+            super::components::EdgeEnd::New {
+                class_iri: &input.class_iri,
+                status: supplied_status,
+            },
+            super::components::EdgeEnd::Existing(&object),
+        )?;
         validate_relation_for_subject_types(
             state,
             subject_types,
@@ -240,6 +273,9 @@ pub fn record_decision_with_cluster(
     author: &str,
     when: DateTime<Utc>,
 ) -> anyhow::Result<(RecordOutcome, Vec<MintedClusterNode>)> {
+    // Relation targets are resolved and validated under the same lock that
+    // covers the write (see `record_instance_with_relation_args`).
+    let _guard = state.lock_proposal_writes()?;
     // Up-front: resolve + legality-check every non-empty slot before recording
     // anything, so an illegal field/class mapping writes no record at all.
     let mut planned: Vec<(String, String, String, Vec<String>)> = Vec::new();
@@ -270,6 +306,32 @@ pub fn record_decision_with_cluster(
             );
         }
         let predicate_iri = state.resolve_object_property(slot.predicate_local)?;
+        // The widened lifecycle shapes make e.g. SystemComponent --supersedes-->
+        // SystemComponent catalogue-legal; only retire_component may write it.
+        super::lifecycle::guard_component_lifecycle_edge(
+            state,
+            &predicate_iri,
+            std::slice::from_ref(&input.class_iri),
+            std::slice::from_ref(&range_class_iri),
+        )?;
+        // Both ends are new here: the input with its supplied status, and a
+        // minted node at the default status.
+        super::components::guard_retired_component_endpoint(
+            state,
+            &predicate_iri,
+            super::components::EdgeEnd::New {
+                class_iri: &input.class_iri,
+                status: input
+                    .properties
+                    .iter()
+                    .find(|(predicate, _)| predicate == &state.capture.status)
+                    .map(|(_, status)| status.as_str()),
+            },
+            super::components::EdgeEnd::New {
+                class_iri: &range_class_iri,
+                status: Some(DEFAULT_LIFECYCLE_STATUS),
+            },
+        )?;
         planned.push((
             slot.predicate_local.to_string(),
             predicate_iri,
@@ -373,11 +435,24 @@ fn resolve_relation_target(
             }
         }
     }
-    let matches = if expected_classes.is_empty() {
+    let mut matches = if expected_classes.is_empty() {
         resolve_record_exact_all(state, target)
     } else {
         resolve_instance_exact_all(state, target, &expected_classes)
     };
+    // A retired component can share its name with a current one (a successor
+    // renamed to the old name). The current one is the target; a retired match
+    // alone is kept so the caller is told what became of it.
+    if matches.len() > 1 {
+        let current = matches
+            .iter()
+            .filter(|(iri, _)| !super::components::is_retired_component(state, iri))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !current.is_empty() {
+            matches = current;
+        }
+    }
     match matches.len() {
         0 if expected_classes.is_empty() => {
             anyhow::bail!(

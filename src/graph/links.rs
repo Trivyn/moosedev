@@ -246,7 +246,11 @@ pub async fn suggest_links_for_record(
 
     let mut suggestions: Vec<LinkSuggestion> = Vec::new();
     for (rank, hit_iri, hit_class) in ranked {
-        if hit_iri == iri || record_pair_linked(state, iri, &hit_iri) {
+        // A retired component is no target: `relate` would refuse the edge.
+        if hit_iri == iri
+            || record_pair_linked(state, iri, &hit_iri)
+            || super::components::is_retired_component(state, &hit_iri)
+        {
             continue;
         }
         let legal = state

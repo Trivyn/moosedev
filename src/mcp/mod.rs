@@ -59,6 +59,119 @@ fn format_path_list(paths: &[String]) -> String {
     }
 }
 
+fn format_record_line(record: &graph::LinkedRecord) -> String {
+    format!("  - {} \"{}\" ({})", record.kind, record.title, record.iri)
+}
+
+/// Plain-text report for `retire_component`, built only from the outcome.
+/// Every list is shown whole: a retirement is reviewed once, and a truncated
+/// preview would hide exactly what the confirmation is for.
+fn format_retire_report(out: &graph::RetireOutcome) -> String {
+    let who = format!("\"{}\" ({})", out.component_name, out.component_iri);
+    let mut lines = Vec::new();
+    let head = match (&out.successor, out.dry_run) {
+        (Some((iri, name)), true) => {
+            format!("DRY RUN — nothing written: would merge {who} into \"{name}\" ({iri}); it becomes superseded.")
+        }
+        (Some((iri, name)), false) => {
+            format!(
+                "Merged {who} into \"{name}\" ({iri}); it is now superseded (rationale {}).",
+                out.rationale_iri.as_deref().unwrap_or("-")
+            )
+        }
+        (None, true) => {
+            format!("DRY RUN — nothing written: would retire {who}; it becomes deprecated.")
+        }
+        (None, false) => format!(
+            "Retired {who}; it is now deprecated (rationale {}).",
+            out.rationale_iri.as_deref().unwrap_or("-")
+        ),
+    };
+    lines.push(head);
+
+    if !out.affected_constraints.is_empty() {
+        let label = match &out.successor {
+            Some((_, name)) => format!("Constraints whose reach widens to \"{name}\""),
+            None => "Constraints no longer delivered".to_string(),
+        };
+        lines.push(format!("\n{label} ({}):", out.affected_constraints.len()));
+        lines.extend(
+            out.affected_constraints
+                .iter()
+                .map(|c| format!("  - \"{}\" ({})", c.title, c.iri)),
+        );
+    }
+    if !out.moved_edges.is_empty() {
+        lines.push(format!("\nLinks moved ({}):", out.moved_edges.len()));
+        let mut predicates: Vec<&str> = out
+            .moved_edges
+            .iter()
+            .map(|e| e.predicate_local.as_str())
+            .collect();
+        predicates.sort_unstable();
+        predicates.dedup();
+        for predicate in predicates {
+            let edges: Vec<_> = out
+                .moved_edges
+                .iter()
+                .filter(|e| e.predicate_local == predicate)
+                .collect();
+            lines.push(format!("  {predicate} ({}):", edges.len()));
+            lines.extend(edges.iter().map(|e| {
+                let note = if e.already_on_successor {
+                    " (successor already had it)"
+                } else {
+                    ""
+                };
+                format!("    - {}{note}", e.subject_iri)
+            }));
+        }
+    }
+    if !out.moved_paths.is_empty() {
+        lines.push(format!(
+            "\nPaths moved: {}",
+            format_path_list(&out.moved_paths)
+        ));
+    }
+    if !out.paths_already_on_successor.is_empty() {
+        lines.push(format!(
+            "\nPaths already on the successor: {}",
+            format_path_list(&out.paths_already_on_successor)
+        ));
+    }
+    if !out.not_moved_edges.is_empty() {
+        lines.push(format!(
+            "\nLinks NOT moved ({}):",
+            out.not_moved_edges.len()
+        ));
+        lines.extend(out.not_moved_edges.iter().map(|e| {
+            let arrow = if e.outgoing { "->" } else { "<-" };
+            format!("  - {} {arrow} {}", e.predicate_local, e.other_iri)
+        }));
+    }
+    if out.successor.is_none() {
+        if !out.remaining_paths.is_empty() {
+            lines.push(format!(
+                "\nRemaining paths (kept as history): {}",
+                format_path_list(&out.remaining_paths)
+            ));
+        }
+        if !out.remaining_records.is_empty() {
+            lines.push(format!(
+                "\nRemaining linked records ({}):",
+                out.remaining_records.len()
+            ));
+            lines.extend(out.remaining_records.iter().map(format_record_line));
+        }
+    }
+    if out.dry_run {
+        lines.push(
+            "\nConfirm this with the user, then re-run without `dry_run` to apply it.".to_string(),
+        );
+    }
+    lines.join("\n")
+}
+
 /// Best-effort capture-time nudge: up to three legal, unasserted links for the new
 /// record. Never fails the write — a suggestion error just yields no note.
 async fn capture_suggestion_note(state: &graph::AppState, iri: &str) -> String {
@@ -543,6 +656,35 @@ pub struct RetractArgs {
     pub timestamp: Option<String>,
     /// Optional author to attribute the retraction to (defaults to the MCP client name).
     pub author: Option<String>,
+}
+
+/// Arguments for the `retire_component` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RetireComponentArgs {
+    /// SystemComponent IRI, or its exact name (rdfs:label), to retire.
+    pub component: String,
+    /// Why the component is retired or merged — captured as a linked
+    /// Rationale. Required.
+    pub rationale: String,
+    /// Optional IRI or exact name of the component that absorbs this one. When
+    /// given, links and paths move to it and it supersedes this component;
+    /// when absent the component is only marked deprecated.
+    pub into: Option<String>,
+    /// Report what would change and write nothing (default false).
+    pub dry_run: Option<bool>,
+    /// Optional RFC3339 timestamp to stamp the rationale with (defaults to now).
+    pub timestamp: Option<String>,
+    /// Optional author to attribute the retirement to (defaults to the MCP client name).
+    pub author: Option<String>,
+}
+
+/// Arguments for the `rename_component` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RenameComponentArgs {
+    /// SystemComponent IRI, or its exact current name (rdfs:label).
+    pub component: String,
+    /// The new name. Must not belong to another current component.
+    pub new_name: String,
 }
 
 /// Arguments for the `unrelate` tool.
@@ -1568,6 +1710,114 @@ impl MooseDevServer {
         }
     }
 
+    /// Retire a SystemComponent, optionally merging it into another.
+    #[tool(
+        description = "Retire a SystemComponent so it leaves the current working set (listings, dossiers, validation, and `relations` targets). Without `into` it is marked `deprecated`. With `into` (IRI or exact name of the absorbing component) it is merged: its `concerns`/`constrains`/`realizes` links and covered paths move to the other component, which then supersedes it. A merge widens every moved Constraint to all of the absorbing component's files, and a plain retire stops the component's Constraints being delivered, so call with `dry_run: true` first, show the user the affected Constraints, and get one confirmation before the real call; when several components are being retired in one refactor, preview them all and ask once. `rationale` (why) is required and captured as a linked Rationale. Not reversible through a tool. Returns a plain-text report of what changed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn retire_component(
+        &self,
+        Parameters(args): Parameters<RetireComponentArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let component = args.component.trim().to_string();
+        let rationale = args.rationale.trim().to_string();
+        if component.is_empty() {
+            return Ok(tool_error("`component` must not be empty"));
+        }
+        if rationale.is_empty() {
+            return Ok(tool_error(
+                "`rationale` must not be empty — capture WHY the component is retired",
+            ));
+        }
+        let into = args.into.as_deref().map(str::trim);
+        if into.is_some_and(str::is_empty) {
+            // A blank `into` is a malformed merge, not a request to retire
+            // without a successor; guessing the latter would deprecate it.
+            return Ok(tool_error(
+                "`into` must name the component that absorbs this one; omit `into` to retire \
+                 the component without a successor",
+            ));
+        }
+        let dry_run = args.dry_run.unwrap_or(false);
+        let agent = resolve_author(&args.author, &context);
+        let now = match resolve_when(&args.timestamp) {
+            Ok(t) => t,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
+        match graph::retire_component(
+            &self.state,
+            &component,
+            &rationale,
+            into,
+            dry_run,
+            &agent,
+            now,
+        ) {
+            Ok(out) => {
+                if !out.dry_run {
+                    if let Some(rationale_iri) = &out.rationale_iri {
+                        // Best-effort; never fails the write.
+                        if let Err(e) = provenance::record_provenance_at(
+                            &self.state.store,
+                            rationale_iri,
+                            &agent,
+                            now,
+                        ) {
+                            tracing::warn!("provenance write failed for {rationale_iri}: {e}");
+                        }
+                        if let Err(e) = self.state.index_record(rationale_iri).await {
+                            tracing::warn!("dense index failed for {rationale_iri}: {e}");
+                        }
+                    }
+                    self.state.note_project_write();
+                }
+                Ok(tool_ok(format_retire_report(&out)))
+            }
+            Err(e) => Ok(tool_error(format!("failed to retire component: {e}"))),
+        }
+    }
+
+    /// Rename a SystemComponent in place.
+    #[tool(
+        description = "Rename a SystemComponent in place, keeping its IRI and every link. Use it when a component's scope changed and its name no longer fits. Refused if another current component already has that name. Idempotent: renaming to the current name is reported, not an error. Returns the old and new name and the IRI.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn rename_component(
+        &self,
+        Parameters(args): Parameters<RenameComponentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let component = args.component.trim().to_string();
+        let new_name = args.new_name.trim().to_string();
+        if component.is_empty() || new_name.is_empty() {
+            return Ok(tool_error("`component` and `new_name` must not be empty"));
+        }
+        match graph::rename_component(&self.state, &component, &new_name) {
+            Ok(out) if out.changed => {
+                self.state.note_project_write();
+                Ok(tool_ok(format!(
+                    "Renamed \"{}\" -> \"{}\" ({})",
+                    out.old_name, out.new_name, out.component_iri
+                )))
+            }
+            Ok(out) => Ok(tool_ok(format!(
+                "\"{}\" ({}) already has that name; nothing changed",
+                out.old_name, out.component_iri
+            ))),
+            Err(e) => Ok(tool_error(format!("failed to rename component: {e}"))),
+        }
+    }
+
     /// Get the recorded knowledge directly linked to a CodeEntity.
     #[tool(
         description = "Retrieve the recorded knowledge governing one code entity, including directly linked records and records inherited through its realized SystemComponent. Call this before editing a specific function, type, or module, and treat returned Constraints as hard rules. Pass exactly one selector: `file` + 1-based `line` + 1-based UTF-8 byte `col`, `symbol`, or CodeEntity `iri`. Read-only and entity-specific: a no-recorded-knowledge result does not replace project recall.",
@@ -2052,7 +2302,7 @@ mod tests {
     use rmcp::model::Tool;
     use serde_json::Value;
 
-    const TOOL_NAMES: [&str; 22] = [
+    const TOOL_NAMES: [&str; 24] = [
         "align_concepts",
         "capture_decision_point",
         "declare_component_paths",
@@ -2068,6 +2318,8 @@ mod tests {
         "record_important_decision",
         "relate",
         "remove_component_paths",
+        "rename_component",
+        "retire_component",
         "retract_decision",
         "sparql",
         "suggest_links",
@@ -2601,8 +2853,13 @@ mod tests {
             "record_important_decision",
         ];
         let additive_idempotent = ["declare_component_paths", "link_code", "relate"];
-        let destructive = ["export_graph", "retract_decision", "supersede_decision"];
-        let destructive_idempotent = ["remove_component_paths", "unrelate"];
+        let destructive = [
+            "export_graph",
+            "retire_component",
+            "retract_decision",
+            "supersede_decision",
+        ];
+        let destructive_idempotent = ["remove_component_paths", "rename_component", "unrelate"];
 
         for name in read_only {
             let annotations = tool(&catalog, name).annotations.as_ref().unwrap();

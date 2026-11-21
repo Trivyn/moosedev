@@ -222,6 +222,11 @@ code under my cursor?"*.
    Trailing `/` = directory prefix; no slash = exact file. A file is governed by every component
    whose paths contain it; the most specific (longest) match is the one it `realizes`. Idempotent and
    add-only. Skip components with no code home (process/docs components) — do not force paths.
+   If two components turn out to be one, fold one into the other with
+   `retire_component(component, rationale, into)`: preview with `dry_run: true`, show the user the
+   Constraints whose reach changes, and ask once for all the merges. Retire one with no successor
+   without `into`; rename one whose scope changed with `rename_component`; remove a single wrong
+   link with `unrelate`.
 2. **Mint the skeleton** (operator step, daemon stopped — it holds the store lock; the CLI
    prints the pidfile hint): `moosedev index && moosedev mint` — review the dry-run
    (creates in the expected range, `unmapped paths` should shrink to files you deliberately
