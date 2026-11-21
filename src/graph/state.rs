@@ -358,6 +358,17 @@ impl AppState {
             .map_err(|_| anyhow::anyhow!("proposal write lock poisoned"))
     }
 
+    /// Serialize with enrichment. Hold across a delete of data quads plus
+    /// `mark_inferred_stale`, so an enrichment that computed its delta from the
+    /// pre-delete graph cannot commit after it and restore the removed edge.
+    /// Lock order: the proposal lock first, then this one. Enrichment takes only
+    /// this lock and never the proposal lock, so the order cannot invert.
+    pub(crate) fn lock_enrichment(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.enrich_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Mark the reasoner-materialized edges stale — call after any write that changes the
     /// project graph, so the next read re-enriches.
     pub fn mark_inferred_stale(&self) {

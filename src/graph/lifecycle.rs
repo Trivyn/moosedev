@@ -2,7 +2,9 @@
 //! These operations preserve history and write graph edges in transactions.
 
 use chrono::{DateTime, Utc};
-use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad};
+use oxigraph::model::{
+    GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, Term,
+};
 
 use super::capture::{
     capture_instance_quads, plan_relation_args, require_information_record, AppliedEdge,
@@ -11,8 +13,9 @@ use super::capture::{
 use super::context::first_literal;
 use super::relations::validate_relation_endpoints;
 use super::state::AppState;
-use super::util::{local_name, mint_instance_iri};
+use super::util::{local_name, mint_instance_iri, OWL_INVERSE_OF, OWL_SYMMETRIC_PROPERTY};
 use super::PROJECT_KG_GRAPH_IRI;
+use crate::ontology;
 
 pub(crate) const SUPERSESSION_REASON_PREDICATE: &str =
     "http://www.w3.org/2000/01/rdf-schema#comment";
@@ -494,19 +497,33 @@ fn supersede_decision_inner(
     })
 }
 
+/// Predicates that change only through `supersede_decision` / `retract_decision`
+/// / ratification, by local name.
+pub(crate) const LIFECYCLE_PREDICATES: &[&str] = &[
+    "supersedes",
+    "isSupersededBy",
+    "hasRationale",
+    "isRationaleFor",
+];
+
+/// Judgment predicates are ratification-only: a bare playsRole / hasCriticality
+/// edge would carry no proposal node (no confidence, no ratification
+/// provenance) and would be invisible to the dossier badges and the policy
+/// gate, which read judgment nodes.
+pub fn is_judgment_predicate(local: &str) -> bool {
+    ["playsRole", "hasCriticality"]
+        .iter()
+        .any(|judgment| judgment.eq_ignore_ascii_case(local))
+}
+
 fn reject_managed_relation_args(
     state: &AppState,
     relations: &[(String, String)],
 ) -> anyhow::Result<()> {
-    let managed = [
-        "supersedes",
-        "isSupersededBy",
-        "hasRationale",
-        "isRationaleFor",
-    ]
-    .into_iter()
-    .map(|local| state.resolve_object_property(local))
-    .collect::<anyhow::Result<Vec<_>>>()?;
+    let managed = LIFECYCLE_PREDICATES
+        .iter()
+        .map(|local| state.resolve_object_property(local))
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     for (predicate_local, _) in relations {
         if state
@@ -525,13 +542,6 @@ fn reject_managed_relation_args(
 /// Architecture/code vocabularies define the reportable domain surface; this
 /// avoids leaking generic alignment superproperties into repair suggestions.
 fn semantic_outgoing_edges(state: &AppState, subject: &NamedNode) -> Vec<AppliedEdge> {
-    const LIFECYCLE_RELATIONS: &[&str] = &[
-        "supersedes",
-        "isSupersededBy",
-        "hasRationale",
-        "isRationaleFor",
-    ];
-
     let project_graph = NamedNodeRef::new_unchecked(PROJECT_KG_GRAPH_IRI);
     let mut edges = state
         .store
@@ -558,7 +568,7 @@ fn semantic_outgoing_edges(state: &AppState, subject: &NamedNode) -> Vec<Applied
                 return None;
             }
             let predicate_local = local_name(predicate_iri).to_string();
-            if LIFECYCLE_RELATIONS.contains(&predicate_local.as_str()) {
+            if LIFECYCLE_PREDICATES.contains(&predicate_local.as_str()) {
                 return None;
             }
             Some(AppliedEdge {
@@ -772,6 +782,192 @@ pub(crate) fn relate_unlocked(
         subject_iri: subject_iri.to_string(),
         predicate_iri,
         object_iri: object_iri.to_string(),
+    })
+}
+
+/// What [`unrelate`] removed: the asserted edge and/or its stored inverse.
+#[derive(Debug)]
+pub struct UnrelateOutcome {
+    pub subject_iri: String,
+    pub predicate_iri: String,
+    pub object_iri: String,
+    /// The `(subject, predicate, object)` quad existed and was removed.
+    pub removed: bool,
+    /// The `(object, inverse, subject)` quad existed and was removed.
+    pub inverse_removed: bool,
+}
+
+/// The ontology-declared inverses of `predicate_iri`, deduplicated and sorted:
+/// `owl:inverseOf` in either direction from the three domain ontology graphs,
+/// plus the predicate itself when it is an `owl:SymmetricProperty`.
+pub(crate) fn declared_inverses(
+    state: &AppState,
+    predicate_iri: &str,
+) -> anyhow::Result<Vec<String>> {
+    let predicate = NamedNodeRef::new(predicate_iri)?;
+    let inverse_of = NamedNodeRef::new(OWL_INVERSE_OF)?;
+    let mut inverses = std::collections::BTreeSet::new();
+    for graph_iri in [
+        ontology::SE_DOMAIN_GRAPH_IRI,
+        ontology::ARCH_DOMAIN_GRAPH_IRI,
+        ontology::CODE_DOMAIN_GRAPH_IRI,
+    ] {
+        let graph = GraphNameRef::NamedNode(NamedNodeRef::new(graph_iri)?);
+        for quad in state.store.quads_for_pattern(
+            Some(predicate.into()),
+            Some(inverse_of),
+            None,
+            Some(graph),
+        ) {
+            if let Term::NamedNode(inverse) = quad?.object {
+                inverses.insert(inverse.into_string());
+            }
+        }
+        for quad in state.store.quads_for_pattern(
+            None,
+            Some(inverse_of),
+            Some(predicate.into()),
+            Some(graph),
+        ) {
+            if let NamedOrBlankNode::NamedNode(inverse) = quad?.subject {
+                inverses.insert(inverse.into_string());
+            }
+        }
+        if state
+            .store
+            .quads_for_pattern(
+                Some(predicate.into()),
+                Some(NamedNodeRef::new(moose::RDF_TYPE)?),
+                Some(NamedNodeRef::new(OWL_SYMMETRIC_PROPERTY)?.into()),
+                Some(graph),
+            )
+            .next()
+            .is_some()
+        {
+            inverses.insert(predicate_iri.to_string());
+        }
+    }
+    Ok(inverses.into_iter().collect())
+}
+
+/// Remove one asserted object-property edge — the inverse of [`relate`] — and
+/// its stored inverse orientation, in one transaction. Lifecycle, judgment and
+/// `realizes` edges are refused: they change only through `supersede_decision` /
+/// `retract_decision`, ratification, and `moosedev mint` / `link_code`. Both
+/// orientations are removed so a reasoner-materialized copy cannot survive via a
+/// stored inverse; remaining inferred copies are dropped by the next enrichment.
+/// Idempotent: removing an absent edge succeeds with both flags false.
+pub fn unrelate(
+    state: &AppState,
+    subject_iri: &str,
+    predicate_local: &str,
+    object_iri: &str,
+) -> anyhow::Result<UnrelateOutcome> {
+    let _guard = state.lock_proposal_writes()?;
+    let subject = NamedNode::new(subject_iri)
+        .map_err(|e| anyhow::anyhow!("invalid subject IRI {subject_iri}: {e}"))?;
+    let object = NamedNode::new(object_iri)
+        .map_err(|e| anyhow::anyhow!("invalid object IRI {object_iri}: {e}"))?;
+    let predicate_iri = state.resolve_object_property(predicate_local).map_err(|e| {
+        anyhow::anyhow!(
+            "unknown relationship {predicate_local:?} (not an object property in the architecture ontology): {e}"
+        )
+    })?;
+    let inverse_iris = declared_inverses(state, &predicate_iri)?;
+
+    // Refuse by local name, for the predicate and its declared inverse alike.
+    let realizes = state.resolve_object_property("realizes")?;
+    let realizes_inverses = declared_inverses(state, &realizes)?;
+    for iri in std::iter::once(&predicate_iri).chain(&inverse_iris) {
+        let local = local_name(iri);
+        if LIFECYCLE_PREDICATES
+            .iter()
+            .any(|managed| managed.eq_ignore_ascii_case(local))
+        {
+            anyhow::bail!(
+                "relationship {local:?} is a lifecycle edge managed by supersede_decision / \
+                 retract_decision and ratification; it cannot be removed with `unrelate`"
+            );
+        }
+        if is_judgment_predicate(local) {
+            anyhow::bail!(
+                "{local:?} is ratification-only: judgments are proposed by `moosedev classify` \
+                 (or recategorized in the workbench) and change on human acceptance — never \
+                 removed directly"
+            );
+        }
+        if *iri == realizes || realizes_inverses.contains(iri) {
+            anyhow::bail!(
+                "relationship {local:?} is managed by `moosedev mint` / `link_code`; it cannot be removed with `unrelate`"
+            );
+        }
+    }
+
+    let graph = GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI)?);
+    let forward = Quad::new(
+        subject.clone(),
+        NamedNode::new(&predicate_iri)?,
+        object.clone(),
+        graph.clone(),
+    );
+    let inverses = inverse_iris
+        .iter()
+        .map(|iri| {
+            Ok(Quad::new(
+                object.clone(),
+                NamedNode::new(iri)?,
+                subject.clone(),
+                graph.clone(),
+            ))
+        })
+        .collect::<anyhow::Result<Vec<Quad>>>()?;
+
+    // Hold the enrichment lock from the provenance read through the stale flag,
+    // so no enrichment computed from the old graph can commit in between.
+    let _enrich_guard = state.lock_enrichment();
+    let present = |quad: &Quad| state.store.contains(quad.as_ref());
+    let removed = present(&forward)?;
+    let mut inverse_removed = false;
+    let mut removals = Vec::new();
+    if removed {
+        removals.push(forward.clone());
+    }
+    for quad in &inverses {
+        if present(quad)? {
+            inverse_removed = true;
+            removals.push(quad.clone());
+        }
+    }
+    // Drop the inference tags of the quads going away: a stale tag would mark a
+    // later re-assertion of the same edge as reasoner-inferred.
+    let mut targets = vec![forward];
+    targets.extend(inverses);
+    let provenance = crate::provenance::reasoner_inference_provenance_for(
+        &state.store,
+        PROJECT_KG_GRAPH_IRI,
+        &targets,
+    )?;
+
+    let mut txn = state
+        .store
+        .start_transaction()
+        .map_err(|e| anyhow::anyhow!("unrelate transaction: {e}"))?;
+    for quad in removals.iter().chain(&provenance) {
+        txn.remove(quad.as_ref());
+    }
+    txn.commit()
+        .map_err(|e| anyhow::anyhow!("unrelate commit: {e}"))?;
+    if removed || inverse_removed {
+        state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+        state.mark_inferred_stale();
+    }
+
+    Ok(UnrelateOutcome {
+        subject_iri: subject_iri.to_string(),
+        predicate_iri,
+        object_iri: object_iri.to_string(),
+        removed,
+        inverse_removed,
     })
 }
 
