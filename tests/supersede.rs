@@ -946,6 +946,10 @@ fn proposed_supersession_rejects_duplicates_and_rejection_leaves_old_authoritati
         vec!["rejected"]
     );
     assert_eq!(graph::pending_count(&state).unwrap(), 0);
+    // The rejected replacement keeps its `supersedes` edge as history; the old
+    // record is still in force, so that edge is not drift (#56).
+    let report = validation::validate_project(&state).unwrap();
+    assert!(report.conforms(), "{}", validation::format_report(&report));
 }
 
 #[test]

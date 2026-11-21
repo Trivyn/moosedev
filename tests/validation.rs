@@ -367,6 +367,66 @@ fn pending_proposed_supersession_still_conforms() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A retracted replacement's `supersedes` edge stays as history, but the claim was
+/// withdrawn: its object is still in force and must not be flagged — the repair the
+/// violation names would retire it (#56). A replacement that was itself SUPERSEDED
+/// still counts: in A → B → C, C replacing B does not bring A back.
+#[test]
+fn withdrawn_supersession_claim_is_not_drift() {
+    let dir = std::env::temp_dir().join(format!(
+        "moosedev-validation-withdrawn-supersession-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ontology_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ontologies");
+    let state = AppState::bootstrap(&dir, &ontology_dir).expect("bootstrap app state");
+    let supersedes = state.resolve_object_property("supersedes").unwrap();
+
+    // The issue's shape: B captured with a mistaken `supersedes` to A, then retracted.
+    let still_in_force = record_accepted(&state, "Weakest-pair cluster confidence");
+    let mistaken = record_accepted(&state, "Direct FK is a relation, not similarity");
+    insert_iri(&state, &mistaken, &supersedes, &still_in_force);
+    assert!(
+        !validation::validate_project(&state)
+            .expect("validate")
+            .conforms(),
+        "while the mistaken claimant is accepted, its object is drift"
+    );
+    graph::retract_decision(
+        &state,
+        &mistaken,
+        "Captured with an incorrect supersedes link.",
+        "test-agent",
+        Utc::now(),
+    )
+    .expect("retract the mistaken record");
+    let report = validation::validate_project(&state).expect("validate project");
+    assert!(
+        report.conforms(),
+        "a retracted claimant retires nothing:\n{}",
+        validation::format_report(&report)
+    );
+
+    // A superseded claimant's edge stays in force.
+    let original = record_accepted(&state, "The original");
+    let replaced_replacement = record_with_status(&state, "The first revision", "superseded");
+    insert_iri(&state, &replaced_replacement, &supersedes, &original);
+    let report = validation::validate_project(&state).expect("validate project");
+    let drift: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|v| v.kind == ViolationKind::Other("UnflippedSupersession".to_string()))
+        .map(|v| v.node.as_str())
+        .collect();
+    assert_eq!(
+        drift,
+        vec![original.as_str()],
+        "only the record a superseded claimant replaced is drift"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn record_accepted(state: &AppState, title: &str) -> String {
     record_with_status(state, title, "accepted")
 }
