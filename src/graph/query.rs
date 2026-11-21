@@ -1,17 +1,14 @@
 //! Natural-language query wrapper over MOOSE graph-walk NLQ.
 //! The public API returns both answer and trace for auditability.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use moose::entity_index::EntityIndexCache;
 use moose::pipeline::execute_graph_walk_nlq_with_context;
 use moose::traits::{EngineConfig, LlmClient};
 use moose::types::{EngineError, LlmAssistLevel, PipelineTimings};
-use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 use oxigraph::store::Store;
 
-use super::lifecycle::is_hidden_from_authoritative_reads;
 use super::state::AppState;
 use super::util::local_name;
 use super::PROJECT_KG_GRAPH_IRI;
@@ -115,77 +112,13 @@ async fn execute_query(
     })
 }
 
-/// Build a request-local read projection for authoritative NLQ. Proposed and
-/// rejected records remain in the durable project graph for inbox/audit tools,
-/// but neither those subjects nor an incident edge may enter a graph walk.
-///
-/// The domain and shape graphs are copied unchanged because MOOSE derives its
-/// query vocabulary from the same reader it uses for project data.
+/// Build a request-local read projection for authoritative NLQ: the project
+/// graph without proposed or rejected records or any edge touching one, plus
+/// the ontology graphs MOOSE derives its query vocabulary from.
 fn authoritative_query_store(state: &AppState) -> anyhow::Result<Store> {
-    let project_graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let status = NamedNodeRef::new(&state.capture.status)?;
-    // One readable transaction pins both passes to the same Oxigraph snapshot:
-    // a proposal committed between status discovery and graph copying must not
-    // enter the projection without having been classified as hidden.
-    let transaction = state.store.start_transaction()?;
-    let mut hidden = HashSet::new();
-    for quad in transaction.quads_for_pattern(
-        None,
-        Some(status),
-        None,
-        Some(GraphNameRef::NamedNode(project_graph)),
-    ) {
-        let quad = quad?;
-        let Term::Literal(value) = &quad.object else {
-            continue;
-        };
-        if !is_hidden_from_authoritative_reads(value.value()) {
-            continue;
-        }
-        if let oxigraph::model::NamedOrBlankNode::NamedNode(subject) = &quad.subject {
-            hidden.insert(subject.as_str().to_string());
-        }
-    }
-
-    let graph_iris = [
-        crate::ontology::SE_DOMAIN_GRAPH_IRI,
-        crate::ontology::SE_SHAPES_GRAPH_IRI,
-        crate::ontology::ARCH_DOMAIN_GRAPH_IRI,
-        crate::ontology::ARCH_SHAPES_GRAPH_IRI,
-        crate::ontology::CODE_DOMAIN_GRAPH_IRI,
-        crate::ontology::CODE_SHAPES_GRAPH_IRI,
-        PROJECT_KG_GRAPH_IRI,
-    ];
-    let mut visible = Vec::new();
-    for graph_iri in graph_iris {
-        let graph = NamedNodeRef::new(graph_iri)?;
-        for quad in
-            transaction.quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(graph)))
-        {
-            let quad = quad?;
-            if graph_iri == PROJECT_KG_GRAPH_IRI {
-                let hidden_subject = match &quad.subject {
-                    oxigraph::model::NamedOrBlankNode::NamedNode(subject) => {
-                        hidden.contains(subject.as_str())
-                    }
-                    oxigraph::model::NamedOrBlankNode::BlankNode(_) => false,
-                };
-                let hidden_object = match &quad.object {
-                    Term::NamedNode(object) => hidden.contains(object.as_str()),
-                    _ => false,
-                };
-                if hidden_subject || hidden_object {
-                    continue;
-                }
-            }
-            visible.push(quad);
-        }
-    }
-    drop(transaction);
-
-    let store = Store::new()?;
-    store.extend(visible)?;
-    Ok(store)
+    let mut graphs = super::authoritative::ONTOLOGY_GRAPH_IRIS.to_vec();
+    graphs.push(PROJECT_KG_GRAPH_IRI);
+    super::authoritative::authoritative_view(state, Some(&graphs))
 }
 
 /// Render MOOSE's per-stage timings into a compact, human-readable trace.
@@ -220,7 +153,7 @@ mod tests {
     use std::path::Path;
 
     use chrono::Utc;
-    use oxigraph::model::NamedNode;
+    use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef};
 
     use super::*;
     use crate::graph::{self, RecordInput};

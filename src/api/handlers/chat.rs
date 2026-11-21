@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::Json;
 use moose::chat::session_db::SessionDb;
+use moose::entity_index::EntityIndexCache;
 use moose::types::{
     ChatMessage, ChatRequest, EngineError, LlmAssistLevel, Role, TranscriptMessage,
 };
@@ -73,14 +74,21 @@ pub async fn chat(
         turn_budget_ms: None,
     };
 
+    // The turn reads a lifecycle-filtered view: proposed and rejected records
+    // belong to the ratification inbox, not to answers (#28). Its writes (session,
+    // clarification overlay, execution trace) go through to the live store. The
+    // shared entity index is built from the live store, so the turn gets its own,
+    // built from the view, as the MCP `query` tool does.
+    let store = crate::graph::authoritative::LifecycleFilteredStore::for_chat_turn(&state)
+        .map_err(|e| ApiError::internal(format!("chat view: {e}")))?;
     let llm = state.llm.with_fresh_usage();
     let response = moose::chat::chat_pipeline(
-        &state.store,
+        &store,
         &llm,
         &state.ontology_resolver,
         &state.engine_config,
         session_db,
-        state.entity_index.clone(),
+        Arc::new(EntityIndexCache::new(64)),
         request,
     )
     .await
