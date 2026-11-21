@@ -31,6 +31,7 @@ relationships need synthesis, and use `sparql` for exact or exhaustive reads.
 | `supersede_decision` | Replace a record while preserving the prior version and the rationale for the change. |
 | `retract_decision` | Deprecate a record that no longer applies and has no replacement. |
 | `relate` | Add an ontology-legal relationship between existing records. `supersedes` is accepted only from a `proposed` record and `isSupersededBy` never; use `supersede_decision` to replace a record. |
+| `unrelate` | Remove one asserted relationship between two records, and its stored inverse. Idempotent. Lifecycle (`supersedes`, `hasRationale`, and their inverses), judgment (`playsRole`, `hasCriticality`) and `realizes` edges are refused. |
 | `link_code` | Link a record to a code entity by source position or stable symbol. |
 | `declare_component_paths` | Map repository paths to an existing system component. |
 | `remove_component_paths` | Remove path coverage from a system component, e.g. the old paths after its files move. |

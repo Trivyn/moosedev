@@ -545,6 +545,19 @@ pub struct RetractArgs {
     pub author: Option<String>,
 }
 
+/// Arguments for the `unrelate` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UnrelateArgs {
+    /// IRI of the subject record (the relationship's source).
+    pub subject_iri: String,
+    /// The relationship to remove: an object-property local name from the
+    /// ontology — e.g. "violates", "isMotivatedBy", "concerns". Lifecycle,
+    /// judgment and `realizes` edges are refused.
+    pub predicate: String,
+    /// IRI of the object record (the relationship's target).
+    pub object_iri: String,
+}
+
 /// Arguments for the `relate` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RelateArgs {
@@ -1315,11 +1328,8 @@ impl MooseDevServer {
                 "`predicate` must not be empty (an object-property local name, e.g. \"violates\")",
             ));
         }
-        // Judgment predicates are ratification-only: a bare playsRole /
-        // hasCriticality edge would carry no proposal node (no confidence,
-        // no ratification provenance) and would be invisible to the dossier
-        // badges and the policy gate, which read judgment nodes.
-        if matches!(predicate.as_str(), "playsRole" | "hasCriticality") {
+        // Judgment predicates are ratification-only (see `is_judgment_predicate`).
+        if graph::is_judgment_predicate(&predicate) {
             return Ok(tool_error(format!(
                 "{predicate:?} is ratification-only: judgments are proposed by `moosedev classify` \
                  (or recategorized in the workbench) and materialize on human acceptance — never \
@@ -1336,6 +1346,52 @@ impl MooseDevServer {
                 )))
             }
             Err(e) => Ok(tool_error(format!("failed to relate: {e}"))),
+        }
+    }
+
+    /// Remove one asserted edge between two graph nodes.
+    #[tool(
+        description = "Remove one asserted, ontology-declared object-property edge between two graph nodes, together with its stored inverse — the inverse of `relate`. Use it to correct a mistaken or outdated link. Idempotent: removing an edge that is not there is reported, not an error. Lifecycle edges (`supersedes`, `hasRationale`, and their inverses), judgment edges (`playsRole`, `hasCriticality`) and `realizes` are refused: use `supersede_decision` / `retract_decision` to retire a record, ratification for judgments, and `moosedev mint` / `link_code` for code links. Returns what was removed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn unrelate(
+        &self,
+        Parameters(args): Parameters<UnrelateArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let subject_iri = args.subject_iri.trim().to_string();
+        let predicate = args.predicate.trim().to_string();
+        let object_iri = args.object_iri.trim().to_string();
+        if subject_iri.is_empty() || object_iri.is_empty() {
+            return Ok(tool_error(
+                "`subject_iri` and `object_iri` must not be empty",
+            ));
+        }
+        if predicate.is_empty() {
+            return Ok(tool_error(
+                "`predicate` must not be empty (an object-property local name, e.g. \"violates\")",
+            ));
+        }
+        match graph::unrelate(&self.state, &subject_iri, &predicate, &object_iri) {
+            Ok(out) => {
+                if !(out.removed || out.inverse_removed) {
+                    return Ok(tool_ok(format!(
+                        "No such edge: {} -{}-> {}",
+                        out.subject_iri, predicate, out.object_iri
+                    )));
+                }
+                // Removing an edge changes what inverse-materialization yields.
+                self.state.note_project_write();
+                Ok(tool_ok(format!(
+                    "Unrelated {} -{}-> {}\nedge removed: {}\ninverse removed: {}",
+                    out.subject_iri, predicate, out.object_iri, out.removed, out.inverse_removed
+                )))
+            }
+            Err(e) => Ok(tool_error(format!("failed to unrelate: {e}"))),
         }
     }
 
@@ -1996,7 +2052,7 @@ mod tests {
     use rmcp::model::Tool;
     use serde_json::Value;
 
-    const TOOL_NAMES: [&str; 21] = [
+    const TOOL_NAMES: [&str; 22] = [
         "align_concepts",
         "capture_decision_point",
         "declare_component_paths",
@@ -2017,6 +2073,7 @@ mod tests {
         "suggest_links",
         "suggest_mappings",
         "supersede_decision",
+        "unrelate",
         "validate_against_architecture",
     ];
 
@@ -2545,7 +2602,7 @@ mod tests {
         ];
         let additive_idempotent = ["declare_component_paths", "link_code", "relate"];
         let destructive = ["export_graph", "retract_decision", "supersede_decision"];
-        let destructive_idempotent = ["remove_component_paths"];
+        let destructive_idempotent = ["remove_component_paths", "unrelate"];
 
         for name in read_only {
             let annotations = tool(&catalog, name).annotations.as_ref().unwrap();

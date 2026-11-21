@@ -378,6 +378,36 @@ pub fn reasoner_inferred_data_quads(
     Ok(collect_reasoner_inferences(store, data_graph_iri)?.data_quads)
 }
 
+/// The reification provenance quads (reifier -> triple term, reifier ->
+/// activity) tagging `targets` as reasoner-inferred in `data_graph_iri`. A caller
+/// that deletes a data quad removes these too, so a stale tag cannot later mark a
+/// re-asserted edge as inferred. Read-only.
+pub fn reasoner_inference_provenance_for(
+    store: &Store,
+    data_graph_iri: &str,
+    targets: &[Quad],
+) -> anyhow::Result<Vec<Quad>> {
+    let inferences = collect_reasoner_inferences(store, data_graph_iri)?;
+    let reifiers: std::collections::HashSet<NamedOrBlankNode> = inferences
+        .provenance_quads
+        .iter()
+        .filter(|q| {
+            q.predicate.as_str() == RDF_REIFIES
+                && matches!(&q.object, Term::Triple(t) if targets.iter().any(|target| {
+                    t.subject == target.subject
+                        && t.predicate == target.predicate
+                        && t.object == target.object
+                }))
+        })
+        .map(|q| q.subject.clone())
+        .collect();
+    Ok(inferences
+        .provenance_quads
+        .into_iter()
+        .filter(|q| reifiers.contains(&q.subject))
+        .collect())
+}
+
 /// Remove every triple previously materialized by the reasoner from `data_graph_iri`,
 /// along with its reification provenance in the provenance graph. Idempotent (a no-op
 /// when nothing was materialized). Returns the count of data-graph triples removed.
