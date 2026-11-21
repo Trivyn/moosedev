@@ -658,3 +658,247 @@ fn repo_substrate_plan_counts_when_index_present() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A public rust-analyzer function defined in `package` (issue #59 fixtures).
+fn def_in(package: &str, descriptor: &str, file: &str, name: &str) -> DefinitionEntry {
+    let symbol = format!("rust-analyzer cargo {package} 0.11.0 {descriptor}");
+    DefinitionEntry {
+        producer: "rust-analyzer".to_string(),
+        normalized_symbol: symbols::normalize_symbol(&symbol).expect("valid scip symbol"),
+        symbol,
+        display_name: Some(name.to_string()),
+        kind: Some("Function".to_string()),
+        signature: Some(format!("pub fn {name}()")),
+        file: file.to_string(),
+        is_module: false,
+        is_public: true,
+    }
+}
+
+/// Plan against `definitions` with the given remaps.
+fn plan_with(
+    state: &AppState,
+    definitions: &[DefinitionEntry],
+    remaps: &[graph::PathRemap],
+) -> graph::MintPlan {
+    let terms = graph::CodeTerms::resolve(state).unwrap();
+    let components = graph::load_components(state).unwrap();
+    graph::plan_mint_with_remaps(state, definitions, &terms, &components, None, remaps).unwrap()
+}
+
+/// Mint `definitions` and return normalized symbol -> IRI.
+fn mint_all(
+    state: &AppState,
+    definitions: &[DefinitionEntry],
+) -> std::collections::BTreeMap<String, String> {
+    let terms = graph::CodeTerms::resolve(state).unwrap();
+    graph::apply_mint(state, &plan_with(state, definitions, &[]), &terms).unwrap();
+    graph::entities_by_symbol(state, &terms).unwrap()
+}
+
+#[test]
+fn crate_split_rehomes_entity_in_place_and_keeps_its_links() {
+    let state = bootstrap("rehome-crate-split");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let core = seed_component(&state, "core", "src/");
+    let rdf = seed_component(&state, "rdf crate", "crates/trivyn-rdf/");
+    let old = def_in(
+        "trivyn",
+        "rdf/transform/apply().",
+        "src/rdf/transform.rs",
+        "apply",
+    );
+    let entity = mint_all(&state, std::slice::from_ref(&old))[&old.normalized_symbol].clone();
+    assert!(has_edge(&state, &entity, &terms.realizes, &core));
+    let constraint = record(&state, "Constraint", "Transforms are pure");
+    graph::relate(&state, &constraint, "constrains", &entity).unwrap();
+
+    let moved = def_in(
+        "trivyn-rdf",
+        "rdf/transform/apply().",
+        "crates/trivyn-rdf/src/rdf/transform.rs",
+        "apply",
+    );
+    let plan = plan_with(&state, std::slice::from_ref(&moved), &[]);
+    assert_eq!(plan.rehome.len(), 1, "{plan:#?}");
+    assert_eq!(plan.rehome[0].iri, entity);
+    assert_eq!(plan.rehome[0].basis, graph::RehomeBasis::PackageMove);
+    assert_eq!(
+        plan.rehome[0].old_path.as_deref(),
+        Some("src/rdf/transform.rs")
+    );
+    assert!(
+        plan.create.is_empty(),
+        "the successor must not be minted fresh"
+    );
+    assert!(plan.orphaned.is_empty());
+
+    let outcome = graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!(outcome.rehomed, 1);
+    let after = graph::entities_by_symbol(&state, &terms).unwrap();
+    assert_eq!(after.get(&moved.normalized_symbol), Some(&entity));
+    assert!(!after.contains_key(&old.normalized_symbol));
+    assert_eq!(
+        literal_values(&state, &entity, &terms.defined_in_path),
+        vec!["crates/trivyn-rdf/src/rdf/transform.rs".to_string()]
+    );
+    assert!(has_edge(&state, &entity, &terms.realizes, &rdf));
+    assert!(
+        !has_edge(&state, &entity, &terms.realizes, &core),
+        "realizes is recomputed from the new path, not topped up"
+    );
+    let constrains = state.resolve_object_property("constrains").unwrap();
+    assert!(
+        has_edge(&state, &constraint, &constrains, &entity)
+            || has_edge(
+                &state,
+                &entity,
+                &state.resolve_object_property("isConstrainedBy").unwrap(),
+                &constraint
+            ),
+        "the record link follows the entity"
+    );
+
+    let again = plan_with(&state, std::slice::from_ref(&moved), &[]);
+    assert!(again.rehome.is_empty() && again.create.is_empty() && again.update.is_empty());
+    assert_eq!(again.unchanged, 1);
+    assert!(validation::validate_project(&state).unwrap().conforms());
+}
+
+#[test]
+fn same_symbol_in_an_unrelated_crate_does_not_adopt_a_deleted_entity() {
+    let state = bootstrap("rehome-unrelated");
+    let old = def_in("a", "util/helper().", "crates/a/src/util.rs", "helper");
+    let entity = mint_all(&state, std::slice::from_ref(&old))[&old.normalized_symbol].clone();
+    let constraint = record(&state, "Constraint", "Helpers never allocate");
+    graph::relate(&state, &constraint, "constrains", &entity).unwrap();
+
+    let other = def_in("b", "util/helper().", "crates/b/src/util.rs", "helper");
+    let plan = plan_with(&state, std::slice::from_ref(&other), &[]);
+    assert!(plan.rehome.is_empty(), "{plan:#?}");
+    assert_eq!(plan.create.len(), 1);
+    assert_eq!(plan.orphaned, vec![(entity.clone(), old.normalized_symbol)]);
+    assert_eq!(plan.unresolved_rehomes.len(), 1);
+    assert_eq!(
+        plan.unresolved_rehomes[0].candidates,
+        vec!["crates/b/src/util.rs".to_string()]
+    );
+    let links = &plan.orphan_links[&entity];
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].other, constraint);
+    assert_eq!(links[0].label.as_deref(), Some("Helpers never allocate"));
+}
+
+#[test]
+fn two_plausible_successors_are_reported_not_guessed() {
+    let state = bootstrap("rehome-ambiguous");
+    let old = def_in("app", "util/helper().", "src/util.rs", "helper");
+    let entity = mint_all(&state, std::slice::from_ref(&old))[&old.normalized_symbol].clone();
+
+    let a = def_in("a", "util/helper().", "crates/a/src/util.rs", "helper");
+    let b = def_in("b", "util/helper().", "crates/b/src/util.rs", "helper");
+    let plan = plan_with(&state, &[a, b], &[]);
+    assert!(plan.rehome.is_empty(), "{plan:#?}");
+    assert_eq!(plan.create.len(), 2);
+    assert_eq!(plan.orphaned.len(), 1);
+    assert_eq!(plan.unresolved_rehomes.len(), 1);
+    assert_eq!(plan.unresolved_rehomes[0].iri, entity);
+    assert_eq!(plan.unresolved_rehomes[0].candidates.len(), 2);
+    assert!(
+        !plan.orphan_links.contains_key(&entity),
+        "an orphan with no links carries no recorded knowledge"
+    );
+}
+
+#[test]
+fn remap_rehomes_a_move_that_changed_the_symbol() {
+    let state = bootstrap("rehome-remap");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    // The crate root moved down a level, so module paths lost `rdf/` as well
+    // as changing package: no package-free key can follow that.
+    let old_thing = def_in(
+        "app",
+        "rdf/transform/Thing#new().",
+        "src/rdf/transform.rs",
+        "new",
+    );
+    let old_other = def_in(
+        "app",
+        "rdf/transform/Other#new().",
+        "src/rdf/transform.rs",
+        "new",
+    );
+    let entities = mint_all(&state, &[old_thing.clone(), old_other.clone()]);
+    let new_thing = def_in(
+        "rdf",
+        "transform/Thing#new().",
+        "crates/rdf/src/transform.rs",
+        "new",
+    );
+    let new_other = def_in(
+        "rdf",
+        "transform/Other#new().",
+        "crates/rdf/src/transform.rs",
+        "new",
+    );
+    let moved = [new_thing.clone(), new_other.clone()];
+
+    let without = plan_with(&state, &moved, &[]);
+    assert!(without.rehome.is_empty());
+    assert_eq!(without.orphaned.len(), 2);
+
+    let remap = graph::PathRemap::parse("src/rdf/=crates/rdf/src/").unwrap();
+    let plan = plan_with(&state, &moved, &[remap]);
+    assert_eq!(plan.rehome.len(), 2, "{plan:#?}");
+    assert!(plan
+        .rehome
+        .iter()
+        .all(|rehome| rehome.basis == graph::RehomeBasis::PathRemap));
+    assert!(plan.create.is_empty() && plan.orphaned.is_empty());
+    assert!(plan.unresolved_rehomes.is_empty());
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    let after = graph::entities_by_symbol(&state, &terms).unwrap();
+    // Same-named methods in one file are told apart by logical path.
+    assert_eq!(
+        after[&new_thing.normalized_symbol],
+        entities[&old_thing.normalized_symbol]
+    );
+    assert_eq!(
+        after[&new_other.normalized_symbol],
+        entities[&old_other.normalized_symbol]
+    );
+}
+
+#[test]
+fn remap_that_finds_nothing_says_so() {
+    let state = bootstrap("rehome-remap-miss");
+    let old = def_in("app", "rdf/x/gone().", "src/rdf/x.rs", "gone");
+    let entity = mint_all(&state, std::slice::from_ref(&old))[&old.normalized_symbol].clone();
+    let remap = graph::PathRemap::parse("src/rdf=crates/rdf/src").unwrap();
+    let plan = plan_with(&state, &[], &[remap]);
+    assert_eq!(plan.orphaned.len(), 1);
+    assert_eq!(plan.unresolved_rehomes.len(), 1);
+    assert_eq!(plan.unresolved_rehomes[0].iri, entity);
+    assert!(plan.unresolved_rehomes[0]
+        .reason
+        .contains("crates/rdf/src/x.rs"));
+}
+
+#[test]
+fn enrichment_inverses_are_not_reported_as_recorded_knowledge() {
+    let state = bootstrap("rehome-enriched");
+    seed_component(&state, "core", "src/");
+    let old = def_in("app", "util/gone().", "src/util.rs", "gone");
+    let entity = mint_all(&state, std::slice::from_ref(&old))[&old.normalized_symbol].clone();
+    // Materializes `isRealizedBy` from the component back to the entity.
+    state.ensure_enriched();
+
+    let plan = plan_with(&state, &[], &[]);
+    assert_eq!(plan.orphaned.len(), 1);
+    assert!(
+        !plan.orphan_links.contains_key(&entity),
+        "a component realization is not recorded knowledge: {:?}",
+        plan.orphan_links
+    );
+}

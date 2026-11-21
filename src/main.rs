@@ -68,6 +68,7 @@ enum Mode {
     /// Plan/apply CodeEntity minting from the code substrate.
     Mint {
         apply: bool,
+        remaps: Vec<graph::PathRemap>,
     },
     /// Plan/apply role/criticality judgment proposals from evidence.
     Classify {
@@ -130,8 +131,11 @@ USAGE:
                               Replay git history into the graph (per-commit dates)
     moosedev index            Build the code substrate index (runs the detected
                               SCIP producers: Rust, TypeScript, Python)
-    moosedev mint [--apply]   Mint CodeEntity continuants from the substrate
-                              (dry-run unless --apply is present)
+    moosedev mint [--apply] [--remap OLD=NEW]...
+                              Mint CodeEntity continuants from the substrate
+                              (dry-run unless --apply is present). Entities
+                              whose code moved to another crate are re-homed;
+                              --remap re-homes moves the symbol cannot follow
     moosedev classify [--apply]
                               Propose role/criticality judgments from evidence
                               (dry-run unless --apply; nothing takes effect
@@ -208,7 +212,7 @@ fn parse_mode(args: &[String]) -> anyhow::Result<Mode> {
         Some("init") => parse_init(iter).map(Mode::Init),
         Some("bootstrap") => parse_bootstrap(iter).map(Mode::Bootstrap),
         Some("index") => parse_index(iter).map(|()| Mode::Index),
-        Some("mint") => parse_mint(iter).map(|apply| Mode::Mint { apply }),
+        Some("mint") => parse_mint(iter).map(|(apply, remaps)| Mode::Mint { apply, remaps }),
         Some("classify") => parse_classify(iter).map(|apply| Mode::Classify { apply }),
         Some("resolve") => parse_resolve(iter).map(Mode::Resolve),
         Some("skills") => Ok(Mode::Skills),
@@ -362,19 +366,30 @@ fn parse_index<'a>(mut iter: impl Iterator<Item = &'a String>) -> anyhow::Result
     Ok(())
 }
 
-/// Parse `mint`'s single optional flag; the command is dry-run unless `--apply`.
-fn parse_mint<'a>(iter: impl Iterator<Item = &'a String>) -> anyhow::Result<bool> {
+/// Parse `mint`'s flags: dry-run unless `--apply`, plus any number of
+/// `--remap OLD=NEW` (or `--remap=OLD=NEW`) path moves.
+fn parse_mint<'a>(
+    mut iter: impl Iterator<Item = &'a String>,
+) -> anyhow::Result<(bool, Vec<graph::PathRemap>)> {
     let mut apply = false;
-    for arg in iter {
+    let mut remaps = Vec::new();
+    while let Some(arg) = iter.next() {
         if arg == "--apply" {
             apply = true;
+        } else if arg == "--remap" {
+            let spec = iter
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--remap needs OLD=NEW"))?;
+            remaps.push(graph::PathRemap::parse(spec)?);
+        } else if let Some(spec) = arg.strip_prefix("--remap=") {
+            remaps.push(graph::PathRemap::parse(spec)?);
         } else if arg.starts_with('-') {
-            anyhow::bail!("unknown mint option {arg:?}; expected optional --apply");
+            anyhow::bail!("unknown mint option {arg:?}; expected --apply or --remap OLD=NEW");
         } else {
-            anyhow::bail!("mint accepts only optional --apply; unexpected {arg:?}");
+            anyhow::bail!("mint accepts only --apply and --remap OLD=NEW; unexpected {arg:?}");
         }
     }
-    Ok(apply)
+    Ok((apply, remaps))
 }
 
 /// Parse `classify`'s single optional flag; dry-run unless `--apply`.
@@ -907,7 +922,7 @@ async fn main() -> anyhow::Result<()> {
         Mode::Init(args) => init_mode(args),
         Mode::Bootstrap(args) => temporal::run(args),
         Mode::Index => index_mode(&data_dir),
-        Mode::Mint { apply } => mint_mode(&data_dir, apply).await,
+        Mode::Mint { apply, remaps } => mint_mode(&data_dir, apply, &remaps).await,
         Mode::Classify { apply } => classify_mode(&data_dir, apply).await,
         Mode::Resolve(args) => resolve_mode(&data_dir, args),
         Mode::Skills => skills_mode(),
@@ -994,7 +1009,11 @@ fn index_mode(data_dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Plan or apply CodeEntity minting from the previously built code substrate.
-async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
+async fn mint_mode(
+    data_dir: &Path,
+    apply: bool,
+    remaps: &[graph::PathRemap],
+) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let repo_root = project_root();
     let substrate = Substrate::load(data_dir, &repo_root)
@@ -1015,7 +1034,14 @@ async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
     let terms = graph::CodeTerms::resolve(&state)?;
     let components = graph::load_components(&state)?;
     let definitions = substrate.definitions();
-    let plan = graph::plan_mint(&state, &definitions, &terms, &components, Some(&substrate))?;
+    let plan = graph::plan_mint_with_remaps(
+        &state,
+        &definitions,
+        &terms,
+        &components,
+        Some(&substrate),
+        remaps,
+    )?;
     report_mint_plan(&plan, &components);
 
     if !apply {
@@ -1037,9 +1063,10 @@ async fn mint_mode(data_dir: &Path, apply: bool) -> anyhow::Result<()> {
         anyhow::bail!("post-mint validation failed");
     }
     println!(
-        "mint applied: created {}, updated {} in {:.3}s",
+        "mint applied: created {}, updated {}, re-homed {} in {:.3}s",
         outcome.created.len(),
         outcome.updated,
+        outcome.rehomed,
         started.elapsed().as_secs_f64()
     );
     Ok(())
@@ -1210,23 +1237,91 @@ fn report_mint_plan(plan: &graph::MintPlan, components: &[graph::ComponentEntry]
             println!("  {path}");
         }
     }
+    for rehome in &plan.rehome {
+        let basis = match rehome.basis {
+            graph::RehomeBasis::PackageMove => "package move",
+            graph::RehomeBasis::PathRemap => "--remap",
+        };
+        let planned = graph::PlannedEntity {
+            entry: rehome.entry.clone(),
+            iri: Some(rehome.iri.clone()),
+            realizes: rehome.realizes.clone(),
+        };
+        print!(
+            "REHOME {} {} {} -> {} [{basis}] {}",
+            planned.display_kind(),
+            planned.display_name(),
+            rehome.old_path.as_deref().unwrap_or("?"),
+            rehome.entry.file,
+            rehome.iri
+        );
+        match rehome.realizes.as_deref() {
+            Some(iri) => println!(" realizes {}", component_names.get(iri).unwrap_or(&iri)),
+            None => println!(),
+        }
+    }
+    if !plan.unresolved_rehomes.is_empty() {
+        println!("not re-homed (left orphaned; use --remap OLD=NEW or link_code):");
+        for unresolved in &plan.unresolved_rehomes {
+            println!("  {} {}", unresolved.old_symbol, unresolved.iri);
+            println!("    {}", unresolved.reason);
+            if !unresolved.candidates.is_empty() {
+                println!("    candidates: {}", unresolved.candidates.join(", "));
+            }
+        }
+    }
     if !plan.orphaned.is_empty() {
         println!("orphaned entities:");
         for (iri, symbol) in &plan.orphaned {
             println!("  {symbol} {iri}");
         }
     }
+    if !plan.orphan_links.is_empty() {
+        let records = plan
+            .orphan_links
+            .values()
+            .flatten()
+            .map(|link| link.other.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        println!(
+            "orphaned entities carrying recorded knowledge: {} entities, {} linked nodes \
+             (dossiers at the code's current location will not show these):",
+            plan.orphan_links.len(),
+            records.len()
+        );
+        for (iri, symbol) in &plan.orphaned {
+            let Some(links) = plan.orphan_links.get(iri) else {
+                continue;
+            };
+            println!("  {symbol} {iri}");
+            for link in links {
+                let predicate = link
+                    .predicate
+                    .rsplit(['#', '/'])
+                    .next()
+                    .unwrap_or(&link.predicate);
+                println!(
+                    "    {predicate} {} {}",
+                    link.other,
+                    link.label.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
 
     println!(
-        "summary: create={} update={} unchanged={} skipped-scope={} skipped-tests={} collisions={} unmapped={} orphaned={} out-of-scope={}",
+        "summary: create={} update={} unchanged={} rehome={} not-rehomed={} skipped-scope={} skipped-tests={} collisions={} unmapped={} orphaned={} orphaned-with-knowledge={} out-of-scope={}",
         plan.create.len(),
         plan.update.len(),
         plan.unchanged,
+        plan.rehome.len(),
+        plan.unresolved_rehomes.len(),
         plan.skipped_scope,
         plan.skipped_tests,
         plan.collisions.len(),
         plan.unmapped_paths.len(),
         plan.orphaned.len(),
+        plan.orphan_links.len(),
         plan.out_of_scope.len()
     );
 }
@@ -1817,13 +1912,36 @@ mod tests {
     fn parse_mint_accepts_optional_apply_and_rejects_extras() {
         assert!(matches!(
             parse_mode(&argv(&["mint"])).unwrap(),
-            Mode::Mint { apply: false }
+            Mode::Mint { apply: false, ref remaps } if remaps.is_empty()
         ));
         assert!(matches!(
             parse_mode(&argv(&["mint", "--apply"])).unwrap(),
-            Mode::Mint { apply: true }
+            Mode::Mint { apply: true, .. }
         ));
         assert!(parse_mode(&argv(&["mint", "extra"])).is_err());
+        match parse_mode(&argv(&[
+            "mint",
+            "--remap",
+            "src/rdf/=crates/rdf/src/rdf/",
+            "--remap=src/ai=crates/ai/src/ai",
+        ]))
+        .unwrap()
+        {
+            Mode::Mint { apply, remaps } => {
+                assert!(!apply);
+                assert_eq!(
+                    remaps[0].apply("src/rdf/x.rs").as_deref(),
+                    Some("crates/rdf/src/rdf/x.rs")
+                );
+                assert_eq!(
+                    remaps[1].apply("src/ai/y.rs").as_deref(),
+                    Some("crates/ai/src/ai/y.rs")
+                );
+            }
+            _ => panic!("expected mint mode"),
+        }
+        assert!(parse_mode(&argv(&["mint", "--remap"])).is_err());
+        assert!(parse_mode(&argv(&["mint", "--remap", "no-equals"])).is_err());
     }
 
     #[test]
