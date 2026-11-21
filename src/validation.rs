@@ -195,16 +195,19 @@ fn status_literals(state: &AppState, iri: &str) -> anyhow::Result<Vec<String>> {
 /// can express this — which is the only reason the check lives in Rust. When that
 /// support lands, move the rule into the shapes TTL and delete this.
 ///
-/// A PROPOSED replacement is excluded: its `supersedes` edge is the deferred path's
-/// input, ratified later by `accept_proposed_supersession`, and until then the
-/// predecessor is correctly still current. This mirrors `guard_supersession_edge`,
-/// which admits an edge on exactly that subject — without the exclusion the check
-/// fires on the one workflow the guard exists to preserve.
+/// An edge counts only while its replacement's claim is in force
+/// (`lifecycle::supersession_claim_in_force`). A PROPOSED replacement's edge is the
+/// deferred path's input, ratified later by `accept_proposed_supersession`, and
+/// until then the predecessor is correctly still current. This mirrors
+/// `guard_supersession_edge`, which admits an edge on exactly that subject —
+/// without the exclusion the check fires on the one workflow the guard exists to
+/// preserve. A REJECTED or retracted (`deprecated`) replacement keeps its edge as
+/// history, but its claim was declined or withdrawn, so it retires nothing (#56):
+/// flagging its object would point at a repair that retires a record still in force.
 ///
-/// Semantics match `examples/repair_unflipped_supersessions.rs` exactly, including
-/// skipping a record with no status literal at all and skipping proposed
-/// replacements, so the detector and the repair can never disagree about what
-/// counts as drift.
+/// `examples/repair_unflipped_supersessions.rs` applies the same predicate and also
+/// skips a record with no status literal at all, so the detector and the repair
+/// can never disagree about what counts as drift.
 fn unflipped_supersessions(state: &AppState) -> anyhow::Result<Vec<Violation>> {
     let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
 
@@ -223,9 +226,9 @@ fn unflipped_supersessions(state: &AppState) -> anyhow::Result<Vec<Violation>> {
             continue;
         };
         if let NamedOrBlankNode::NamedNode(replacement) = &quad.subject {
-            if status_literals(state, replacement.as_str())?
+            if !status_literals(state, replacement.as_str())?
                 .iter()
-                .any(|status| crate::graph::lifecycle::is_proposed(status))
+                .all(|status| crate::graph::lifecycle::supersession_claim_in_force(status))
             {
                 continue;
             }

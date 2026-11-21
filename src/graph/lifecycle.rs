@@ -137,6 +137,24 @@ pub fn is_proposed(status: &str) -> bool {
     status.eq_ignore_ascii_case("proposed")
 }
 
+/// Whether a record carrying a `supersedes` edge, at this lifecycle status, is
+/// a replacement whose claim retires its object.
+///
+/// Not while it is `proposed`: the edge is the deferred path's input, and the
+/// predecessor is flipped only when a human ratifies it. Not once it is
+/// `rejected` or `deprecated` (retracted): the claim was declined or withdrawn,
+/// and both keep their edges as history, so the edge alone proves nothing. A
+/// `superseded` replacement still counts: in A → B → C, C replacing B does not
+/// bring A back. A record with no status literal (pre-lifecycle legacy) counts.
+///
+/// The one rule shared by the `UnflippedSupersession` detector and
+/// `examples/repair_unflipped_supersessions.rs`, so the two cannot disagree.
+pub fn supersession_claim_in_force(status: &str) -> bool {
+    !(is_proposed(status)
+        || status.eq_ignore_ascii_case("rejected")
+        || status.eq_ignore_ascii_case("deprecated"))
+}
+
 /// A decision change: the replacement to record, the decision it supersedes, and
 /// the rationale (the *why*) for the change.
 pub struct SupersedeInput {
