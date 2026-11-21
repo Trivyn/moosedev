@@ -339,3 +339,109 @@ fn meta() -> SubstrateMeta {
         1,
     )
 }
+
+/// A component whose files moved: declare the new path, remove the old one. The
+/// old path stops matching, the stale-coverage advisory clears, and a repeat
+/// removal is a reported no-op (#57).
+#[test]
+fn remove_drops_moved_coverage_and_is_idempotent() {
+    let state = bootstrap("remove-moved");
+    let component = seed_component(&state, "ingest component");
+    // The temp data dir is the project root; only the new location exists.
+    std::fs::create_dir_all(state.project_root().join("crates/ingest/src")).unwrap();
+    graph::declare_component_paths(
+        &state,
+        &component,
+        &["src/ingest/".to_string(), "crates/ingest/src/".to_string()],
+    )
+    .unwrap();
+    let stale: Vec<String> = moosedev::validation::stale_component_coverage(&state)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.path)
+        .collect();
+    assert_eq!(stale, vec!["src/ingest/"]);
+
+    let out = graph::remove_component_paths(
+        &state,
+        "ingest component",
+        &[
+            "src/ingest/".to_string(),
+            "src/never-declared.rs".to_string(),
+        ],
+    )
+    .expect("remove paths");
+    assert_eq!(out.component_iri, component);
+    assert_eq!(out.component_name, "ingest component");
+    assert_eq!(out.removed, vec!["src/ingest/"]);
+    assert_eq!(out.not_declared, vec!["src/never-declared.rs"]);
+
+    assert_eq!(
+        literal_values(&state, &component, COVERS_PATH),
+        vec!["crates/ingest/src/"]
+    );
+    assert!(moosedev::validation::stale_component_coverage(&state)
+        .unwrap()
+        .is_empty());
+    let components = graph::load_components(&state).unwrap();
+    assert!(graph::best_component_for_path("src/ingest/csv.rs", &components).is_none());
+    assert_eq!(
+        graph::best_component_for_path("crates/ingest/src/csv.rs", &components)
+            .unwrap()
+            .iri
+            .as_deref(),
+        Some(component.as_str())
+    );
+
+    let before = covers_path_count(&state);
+    let again = graph::remove_component_paths(&state, &component, &["src/ingest/".to_string()])
+        .expect("repeat removal");
+    assert!(again.removed.is_empty());
+    assert_eq!(again.not_declared, vec!["src/ingest/"]);
+    assert_eq!(covers_path_count(&state), before);
+}
+
+#[test]
+fn remove_matches_declared_values_exactly() {
+    let state = bootstrap("remove-exact");
+    let component = seed_component(&state, "substrate component");
+    graph::declare_component_paths(&state, &component, &["src/code/".to_string()]).unwrap();
+
+    let out = graph::remove_component_paths(&state, &component, &["src/code".to_string()])
+        .expect("remove");
+
+    assert!(
+        out.removed.is_empty(),
+        "a file path is not the directory prefix"
+    );
+    assert_eq!(
+        literal_values(&state, &component, COVERS_PATH),
+        vec!["src/code/"]
+    );
+}
+
+#[test]
+fn remove_rejects_non_components_and_invalid_paths() {
+    let state = bootstrap("remove-invalid");
+    let component = seed_component(&state, "substrate component");
+    graph::declare_component_paths(&state, &component, &["src/code/".to_string()]).unwrap();
+    let decision = record(&state, "ArchitecturalDecision", "Not a component");
+    let before = covers_path_count(&state);
+
+    let err = graph::remove_component_paths(&state, &decision, &["src/code/".to_string()])
+        .expect_err("non-component");
+    assert!(err.to_string().contains("SystemComponent"));
+
+    let err = graph::remove_component_paths(
+        &state,
+        &component,
+        &["src/code/".to_string(), "a/../b".to_string()],
+    )
+    .expect_err("invalid paths");
+    assert!(err.to_string().contains("path"));
+    assert_eq!(
+        covers_path_count(&state),
+        before,
+        "an invalid batch removes nothing, not even its valid entries"
+    );
+}

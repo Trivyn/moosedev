@@ -306,7 +306,7 @@ pub fn format_report(report: &ValidationReport) -> String {
     }
     if !report.stale_coverage.is_empty() {
         out.push_str(&format!(
-            "\n\nComponent paths matching no file (non-blocking): {} — not created yet, or moved; declare a moved component's new path with declare_component_paths",
+            "\n\nComponent paths matching no file (non-blocking): {} — not created yet, or moved; for a move, declare the new path with declare_component_paths and drop the old one with remove_component_paths",
             report.stale_coverage.len()
         ));
         for stale in &report.stale_coverage {

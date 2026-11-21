@@ -33,6 +33,7 @@ relationships need synthesis, and use `sparql` for exact or exhaustive reads.
 | `relate` | Add an ontology-legal relationship between existing records. `supersedes` is accepted only from a `proposed` record and `isSupersededBy` never; use `supersede_decision` to replace a record. |
 | `link_code` | Link a record to a code entity by source position or stable symbol. |
 | `declare_component_paths` | Map repository paths to an existing system component. |
+| `remove_component_paths` | Remove path coverage from a system component, e.g. the old paths after its files move. |
 
 Use supersession or retraction to correct the graph. Do not create silent
 duplicates or delete historical knowledge.
