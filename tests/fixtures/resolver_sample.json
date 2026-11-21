@@ -212,7 +212,7 @@
     "expect_symbol": "code/substrate/scip/read_index().",
     "expect_definition": false,
     "note": "reference to temporary SCIP index reader",
-    "anchor": "let index = read_index(&tmp_path).with_context(|| {",
+    "anchor": "let mut index = read_index(&tmp_path).with_context(|| {",
     "token": "read_index"
   },
   {

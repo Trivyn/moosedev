@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod churn;
+pub(crate) mod encoding;
 pub(crate) mod lang;
 pub mod meta;
 pub mod producer;
