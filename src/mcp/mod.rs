@@ -591,6 +591,18 @@ pub struct DeclareComponentPathsArgs {
     pub paths: Vec<String>,
 }
 
+/// Arguments for the `remove_component_paths` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveComponentPathsArgs {
+    /// SystemComponent IRI, or its exact name (rdfs:label).
+    pub component: String,
+    /// Declared coverage values to remove, spelled exactly as declared
+    /// ("src/code/" and "src/code" are different values). Must contain at
+    /// least one path.
+    #[schemars(length(min = 1), inner(length(min = 1)))]
+    pub paths: Vec<String>,
+}
+
 /// Arguments for the `get_entity_dossier` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetEntityDossierArgs {
@@ -1461,6 +1473,45 @@ impl MooseDevServer {
         }
     }
 
+    /// Remove repo path coverage from a SystemComponent.
+    #[tool(
+        description = "Bootstrap/admin tool: remove repo-relative path coverage from an existing SystemComponent — the inverse of `declare_component_paths`. Use it when a component's files moved (declare the new path, then remove the old one) or a declared path was wrong. Pass each value exactly as declared. Idempotent: a value that is not declared is reported, not an error. Code entities under a removed path stop deriving this component unless another declared path still covers them. Returns paths removed and paths that were not declared.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn remove_component_paths(
+        &self,
+        Parameters(args): Parameters<RemoveComponentPathsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let component = args.component.trim().to_string();
+        if component.is_empty() {
+            return Ok(tool_error("`component` must not be empty"));
+        }
+        if args.paths.is_empty() {
+            return Ok(tool_error("`paths` must not be empty"));
+        }
+
+        match graph::remove_component_paths(&self.state, &component, &args.paths) {
+            Ok(out) => {
+                if !out.removed.is_empty() {
+                    self.state.note_project_write();
+                }
+                Ok(tool_ok(format!(
+                    "Removed coverage from \"{}\" ({})\nremoved: {}\nnot declared: {}",
+                    out.component_name,
+                    out.component_iri,
+                    format_path_list(&out.removed),
+                    format_path_list(&out.not_declared)
+                )))
+            }
+            Err(e) => Ok(tool_error(e.to_string())),
+        }
+    }
+
     /// Get the recorded knowledge directly linked to a CodeEntity.
     #[tool(
         description = "Retrieve the recorded knowledge governing one code entity, including directly linked records and records inherited through its realized SystemComponent. Call this before editing a specific function, type, or module, and treat returned Constraints as hard rules. Pass exactly one selector: `file` + 1-based `line` + 1-based UTF-8 byte `col`, `symbol`, or CodeEntity `iri`. Read-only and entity-specific: a no-recorded-knowledge result does not replace project recall.",
@@ -1945,7 +1996,7 @@ mod tests {
     use rmcp::model::Tool;
     use serde_json::Value;
 
-    const TOOL_NAMES: [&str; 20] = [
+    const TOOL_NAMES: [&str; 21] = [
         "align_concepts",
         "capture_decision_point",
         "declare_component_paths",
@@ -1960,6 +2011,7 @@ mod tests {
         "query",
         "record_important_decision",
         "relate",
+        "remove_component_paths",
         "retract_decision",
         "sparql",
         "suggest_links",
@@ -2493,6 +2545,7 @@ mod tests {
         ];
         let additive_idempotent = ["declare_component_paths", "link_code", "relate"];
         let destructive = ["export_graph", "retract_decision", "supersede_decision"];
+        let destructive_idempotent = ["remove_component_paths"];
 
         for name in read_only {
             let annotations = tool(&catalog, name).annotations.as_ref().unwrap();
@@ -2517,6 +2570,12 @@ mod tests {
             assert_eq!(annotations.read_only_hint, Some(false), "{name}");
             assert_eq!(annotations.destructive_hint, Some(true), "{name}");
             assert_eq!(annotations.idempotent_hint, Some(false), "{name}");
+        }
+        for name in destructive_idempotent {
+            let annotations = tool(&catalog, name).annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(false), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(true), "{name}");
+            assert_eq!(annotations.idempotent_hint, Some(true), "{name}");
         }
     }
 

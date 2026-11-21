@@ -38,6 +38,15 @@ pub struct DeclareOutcome {
     pub already_covered: Vec<String>,
 }
 
+/// Result of removing path coverage from a `SystemComponent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveOutcome {
+    pub component_iri: String,
+    pub component_name: String,
+    pub removed: Vec<String>,
+    pub not_declared: Vec<String>,
+}
+
 /// Load all minted `SystemComponent` records and their `coversPath` values from
 /// the project graph.
 ///
@@ -220,23 +229,7 @@ pub fn declare_component_paths(
     paths: &[String],
 ) -> anyhow::Result<DeclareOutcome> {
     let requested = validate_paths(paths)?;
-    let components = load_components(state)?;
-    let resolved = resolve_component(state, &components, component)?;
-    let subject = NamedNode::new(&resolved.iri)
-        .map_err(|e| anyhow::anyhow!("invalid component IRI {}: {e}", resolved.iri))?;
-    let system_component = state.resolve_class("SystemComponent")?;
-    let asserted = asserted_project_types(state, &subject);
-    if !asserted.iter().any(|class| class == &system_component) {
-        anyhow::bail!(
-            "target {} is not a SystemComponent; asserted project types: {}",
-            resolved.iri,
-            if asserted.is_empty() {
-                "(none)".to_string()
-            } else {
-                asserted.join(", ")
-            }
-        );
-    }
+    let (resolved, subject) = resolve_system_component(state, component)?;
 
     let covers_path = datatype_property_iri(&state.arch_vocab, "coversPath")?;
     let existing = literal_values(&state.store, &resolved.iri, &covers_path)?;
@@ -279,6 +272,83 @@ pub fn declare_component_paths(
         added,
         already_covered,
     })
+}
+
+/// Remove repository path coverage from a minted `SystemComponent`.
+///
+/// The inverse of [`declare_component_paths`], for coverage that no longer
+/// applies — most often a component whose files moved, whose old paths would
+/// otherwise be reported as matching no file on every validation run (#57).
+/// `paths` must match declared values exactly (`src/code/` and `src/code` are
+/// different declarations). Removing an undeclared value is a successful no-op,
+/// reported as such.
+pub fn remove_component_paths(
+    state: &AppState,
+    component: &str,
+    paths: &[String],
+) -> anyhow::Result<RemoveOutcome> {
+    let requested = validate_paths(paths)?;
+    let (resolved, subject) = resolve_system_component(state, component)?;
+
+    let covers_path = datatype_property_iri(&state.arch_vocab, "coversPath")?;
+    let existing = literal_values(&state.store, &resolved.iri, &covers_path)?;
+    let (removed, not_declared): (Vec<String>, Vec<String>) = requested
+        .into_iter()
+        .partition(|path| existing.contains(path));
+
+    if !removed.is_empty() {
+        let graph = NamedNode::new(PROJECT_KG_GRAPH_IRI)?;
+        let predicate = NamedNode::new(&covers_path)?;
+        let mut txn = state
+            .store
+            .start_transaction()
+            .map_err(|e| anyhow::anyhow!("remove component paths transaction: {e}"))?;
+        for path in &removed {
+            let quad = Quad::new(
+                subject.clone(),
+                predicate.clone(),
+                Literal::new_simple_literal(path),
+                GraphName::NamedNode(graph.clone()),
+            );
+            txn.remove(quad.as_ref());
+        }
+        txn.commit()
+            .map_err(|e| anyhow::anyhow!("remove component paths commit: {e}"))?;
+        state.entity_index.invalidate_graph(PROJECT_KG_GRAPH_IRI);
+    }
+
+    Ok(RemoveOutcome {
+        component_iri: resolved.iri,
+        component_name: resolved.name,
+        removed,
+        not_declared,
+    })
+}
+
+/// Resolve `component` (IRI or exact name) to a minted component, refusing a
+/// target whose asserted project types do not include `SystemComponent`.
+fn resolve_system_component(
+    state: &AppState,
+    component: &str,
+) -> anyhow::Result<(ResolvedComponent, NamedNode)> {
+    let components = load_components(state)?;
+    let resolved = resolve_component(state, &components, component)?;
+    let subject = NamedNode::new(&resolved.iri)
+        .map_err(|e| anyhow::anyhow!("invalid component IRI {}: {e}", resolved.iri))?;
+    let system_component = state.resolve_class("SystemComponent")?;
+    let asserted = asserted_project_types(state, &subject);
+    if !asserted.iter().any(|class| class == &system_component) {
+        anyhow::bail!(
+            "target {} is not a SystemComponent; asserted project types: {}",
+            resolved.iri,
+            if asserted.is_empty() {
+                "(none)".to_string()
+            } else {
+                asserted.join(", ")
+            }
+        );
+    }
+    Ok((resolved, subject))
 }
 
 /// Collect literal objects for one predicate on one subject in the project KG.
