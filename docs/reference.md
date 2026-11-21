@@ -151,6 +151,20 @@ human ratifies them in the workbench. Both commands are dry runs unless
 `--apply` is present. They open the single-writer store even in dry-run mode, so
 stop the shared daemon before running them.
 
+When code moves, `mint` keeps its entities and the records linked to them. An
+entity whose definition moved into another crate or package, under a different
+directory prefix, is re-homed in place: same entity, new path and symbol. When a
+move also changed the symbol's module path, name the move explicitly:
+
+```sh
+moosedev mint --remap src/rdf/=crates/rdf/src/
+```
+
+`--remap` can be repeated. `mint` never guesses: an entity with more than one
+possible successor is listed under "not re-homed". Entities whose code is gone
+are listed as orphaned, and the ones that records still point at are listed with
+those records, so they can be relinked with `link_code`.
+
 Run `moosedev index` after significant source changes. `moosedev init` can
 install a post-commit refresh hook. To debug position resolution, use 1-based
 line numbers and UTF-8 byte columns:

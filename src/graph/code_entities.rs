@@ -96,6 +96,108 @@ pub struct MintPlan {
     /// behind, and pretending otherwise would be a guess. Report only;
     /// deciding which are prunable needs evidence this plan does not hold.
     pub out_of_scope: Vec<(String, String)>,
+    /// Orphans whose definition moved (issue #59). Applying the plan rewrites
+    /// each entity's identity literals in place, so the IRI, and every record
+    /// link and judgment on it, follows the code. Never in `orphaned`.
+    pub rehome: Vec<Rehome>,
+    /// Orphans that have a possible successor the plan would not pick: more
+    /// than one candidate, or a path that changed by more than a prefix. They
+    /// stay in `orphaned`; resolve with `mint --remap` or `link_code`.
+    pub unresolved_rehomes: Vec<UnresolvedRehome>,
+    /// For each orphan in `orphaned` that something in the project graph
+    /// links to or from: those links. These are records whose code anchor
+    /// is gone, so a dossier at the code's new location will not show them.
+    pub orphan_links: BTreeMap<String, Vec<KnowledgeLink>>,
+}
+
+/// How a moved entity's successor was identified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RehomeBasis {
+    /// The symbol is unchanged apart from its package name, and one file path
+    /// ends with the other: the code moved into another crate or package
+    /// under a different directory prefix.
+    PackageMove,
+    /// An explicit `mint --remap OLD=NEW` path prefix, plus the same name.
+    PathRemap,
+}
+
+/// An orphaned entity re-homed onto the definition it moved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rehome {
+    pub iri: String,
+    pub old_symbol: String,
+    pub old_path: Option<String>,
+    /// The successor definition; its literals replace the entity's.
+    pub entry: DefinitionEntry,
+    /// Component the new path maps to; replaces any existing `realizes`.
+    pub realizes: Option<String>,
+    pub basis: RehomeBasis,
+}
+
+/// An orphan with a possible successor that the plan does not pick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRehome {
+    pub iri: String,
+    pub old_symbol: String,
+    pub reason: String,
+    /// The candidate successors' files.
+    pub candidates: Vec<String>,
+}
+
+/// A link between an orphaned entity and another project-graph node, in
+/// either direction (`link_code` often makes the entity the subject).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLink {
+    pub predicate: String,
+    pub other: String,
+    pub label: Option<String>,
+}
+
+/// A directory (or file) move, `OLD=NEW`, for entities whose symbol changed
+/// along with their path, which automatic re-homing cannot match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathRemap {
+    from: String,
+    to: String,
+}
+
+impl PathRemap {
+    /// Parse `OLD=NEW`. Both sides are repository-relative paths; a trailing
+    /// `/` is optional, and a prefix only matches whole path segments.
+    pub fn parse(spec: &str) -> anyhow::Result<Self> {
+        let Some((from, to)) = spec.split_once('=') else {
+            anyhow::bail!("--remap expects OLD=NEW, got {spec:?}");
+        };
+        let clean = |side: &str| -> anyhow::Result<String> {
+            let side = side.trim_end_matches('/');
+            if side.is_empty()
+                || side.starts_with('/')
+                || side
+                    .split('/')
+                    .any(|segment| segment == ".." || segment.is_empty())
+            {
+                anyhow::bail!(
+                    "--remap paths must be non-empty repository-relative paths, got {spec:?}"
+                );
+            }
+            Ok(side.to_string())
+        };
+        let (from, to) = (clean(from)?, clean(to)?);
+        if from == to {
+            anyhow::bail!("--remap {spec:?} maps a path onto itself");
+        }
+        Ok(Self { from, to })
+    }
+
+    /// The path `path` moved to under this remap, if the remap covers it.
+    pub fn apply(&self, path: &str) -> Option<String> {
+        if path == self.from {
+            return Some(self.to.clone());
+        }
+        path.strip_prefix(&self.from)
+            .filter(|rest| rest.starts_with('/'))
+            .map(|rest| format!("{}{rest}", self.to))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +205,7 @@ pub struct ApplyOutcome {
     /// (normalized_symbol, iri)
     pub created: Vec<(String, String)>,
     pub updated: usize,
+    pub rehomed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +306,19 @@ pub fn plan_mint(
     components: &[ComponentEntry],
     substrate: Option<&Substrate>,
 ) -> anyhow::Result<MintPlan> {
+    plan_mint_with_remaps(state, definitions, terms, components, substrate, &[])
+}
+
+/// [`plan_mint`], with explicit path remaps for moved code whose symbol
+/// changed along with its path (`mint --remap OLD=NEW`).
+pub fn plan_mint_with_remaps(
+    state: &AppState,
+    definitions: &[DefinitionEntry],
+    terms: &CodeTerms,
+    components: &[ComponentEntry],
+    substrate: Option<&Substrate>,
+    remaps: &[PathRemap],
+) -> anyhow::Result<MintPlan> {
     let (candidates, skipped_scope, skipped_tests) = mint_candidates(definitions);
     let (kept, collisions) = dedupe_collisions(candidates);
     // Snapshotted from the same `kept` minting itself walks, so the scope test
@@ -227,6 +343,35 @@ pub fn plan_mint(
         ..MintPlan::default()
     };
 
+    let mut orphans = Vec::new();
+    for (symbol, iri) in &existing {
+        if substrate_symbols.contains(symbol) {
+            if !in_scope.contains(symbol) {
+                plan.out_of_scope.push((iri.clone(), symbol.clone()));
+            }
+            continue;
+        }
+        if symbol.starts_with("ts:") {
+            // Syntactic anchors are orphaned only when the substrate can
+            // positively prove their declaration or file is gone.
+            if substrate
+                .and_then(|substrate| substrate.identity_alive(symbol))
+                .is_some_and(|alive| !alive)
+            {
+                orphans.push((iri.clone(), symbol.clone()));
+            }
+            continue;
+        }
+        orphans.push((iri.clone(), symbol.clone()));
+    }
+
+    let (rehome, unresolved_rehomes) =
+        plan_rehomes(state, terms, definitions, &existing, &orphans, remaps)?;
+    let rehomed_symbols = rehome
+        .iter()
+        .map(|rehome| rehome.entry.normalized_symbol.as_str())
+        .collect::<BTreeSet<_>>();
+
     for entry in kept {
         let mapped_iri = component_iri_for_path(&entry.file, components).map(str::to_string);
         if mapped_iri.is_none() {
@@ -234,6 +379,9 @@ pub fn plan_mint(
         }
 
         match existing.get(&entry.normalized_symbol) {
+            // The successor of a moved entity is written by the re-home, not
+            // minted fresh beside it.
+            None if rehomed_symbols.contains(entry.normalized_symbol.as_str()) => {}
             None => plan.create.push(PlannedEntity {
                 entry,
                 iri: None,
@@ -259,27 +407,320 @@ pub fn plan_mint(
         }
     }
 
-    for (symbol, iri) in existing {
-        if substrate_symbols.contains(&symbol) {
-            if !in_scope.contains(&symbol) {
-                plan.out_of_scope.push((iri, symbol));
-            }
+    let rehomed_iris = rehome
+        .iter()
+        .map(|rehome| rehome.iri.as_str())
+        .collect::<BTreeSet<_>>();
+    let minted = minted_predicates(state, terms)?;
+    for (iri, symbol) in orphans {
+        if rehomed_iris.contains(iri.as_str()) {
             continue;
         }
-        if symbol.starts_with("ts:") {
-            // Syntactic anchors are orphaned only when the substrate can
-            // positively prove their declaration or file is gone.
-            if substrate
-                .and_then(|substrate| substrate.identity_alive(&symbol))
-                .is_some_and(|alive| !alive)
-            {
-                plan.orphaned.push((iri, symbol));
-            }
-            continue;
+        let links = knowledge_links(state, &minted, &iri)?;
+        if !links.is_empty() {
+            plan.orphan_links.insert(iri.clone(), links);
         }
         plan.orphaned.push((iri, symbol));
     }
+    for mut rehome in rehome {
+        rehome.realizes =
+            component_iri_for_path(&rehome.entry.file, components).map(str::to_string);
+        if rehome.realizes.is_none() {
+            plan.unmapped_paths.insert(rehome.entry.file.clone());
+        }
+        plan.rehome.push(rehome);
+    }
+    plan.unresolved_rehomes = unresolved_rehomes;
     Ok(plan)
+}
+
+/// Match orphaned entities to the definitions they moved to (issue #59).
+///
+/// Successors are drawn only from live definitions no entity holds yet, and
+/// every match is one-to-one: a symbol or file several orphans could claim is
+/// reported in the second list, never guessed. Two rules, in order:
+///
+/// 1. Package move: the symbol is unchanged apart from the package name, AND
+///    one file path ends with the other. The path test is what keeps a
+///    same-named definition in an unrelated crate (`crates/a/src/util.rs`
+///    vs `crates/b/src/util.rs`) from adopting a deleted entity's links.
+/// 2. Explicit remap: the entity's path falls under an `OLD=NEW` prefix, and
+///    the new file defines exactly one unclaimed definition with the same
+///    name (narrowed by logical path when the name repeats in the file).
+fn plan_rehomes(
+    state: &AppState,
+    terms: &CodeTerms,
+    definitions: &[DefinitionEntry],
+    existing: &BTreeMap<String, String>,
+    orphans: &[(String, String)],
+    remaps: &[PathRemap],
+) -> anyhow::Result<(Vec<Rehome>, Vec<UnresolvedRehome>)> {
+    if orphans.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    // One candidate per symbol, with minting's own tie-break, so a re-homed
+    // entity lands on the same definition `create` would have used.
+    let (unclaimed, _) = dedupe_collisions(
+        definitions
+            .iter()
+            .filter(|entry| !existing.contains_key(&entry.normalized_symbol))
+            .cloned()
+            .collect(),
+    );
+    let first_literal = |iri: &str, predicate: &str| -> anyhow::Result<Option<String>> {
+        Ok(stored_literals(state, iri, predicate)?.into_iter().next())
+    };
+    let old_paths = orphans
+        .iter()
+        .map(|(iri, _)| first_literal(iri, &terms.defined_in_path))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut matched: BTreeMap<usize, (usize, RehomeBasis)> = BTreeMap::new();
+    let mut taken: BTreeSet<usize> = BTreeSet::new();
+    let mut unresolved: BTreeMap<usize, (String, Vec<String>)> = BTreeMap::new();
+
+    let mut candidates_by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, entry) in unclaimed.iter().enumerate() {
+        if let Some(key) = symbols::package_free_symbol(&entry.normalized_symbol) {
+            candidates_by_key.entry(key).or_default().push(index);
+        }
+    }
+    let mut orphans_by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, (_, symbol)) in orphans.iter().enumerate() {
+        if let Some(key) = symbols::package_free_symbol(symbol) {
+            orphans_by_key.entry(key).or_default().push(index);
+        }
+    }
+    for (key, orphan_indexes) in &orphans_by_key {
+        let Some(candidate_indexes) = candidates_by_key.get(key) else {
+            continue;
+        };
+        let files = candidate_indexes
+            .iter()
+            .map(|&candidate| unclaimed[candidate].file.clone())
+            .collect::<Vec<_>>();
+        if let ([orphan], [candidate]) = (orphan_indexes.as_slice(), candidate_indexes.as_slice()) {
+            let moved = old_paths[*orphan]
+                .as_deref()
+                .is_some_and(|old| one_ends_with_other(old, &unclaimed[*candidate].file, "/"));
+            if moved {
+                matched.insert(*orphan, (*candidate, RehomeBasis::PackageMove));
+                taken.insert(*candidate);
+            } else {
+                let reason = "the same symbol is now defined in another package, but its file \
+                              moved by more than a directory prefix";
+                unresolved.insert(*orphan, (reason.to_string(), files));
+            }
+            continue;
+        }
+        let reason = format!(
+            "{} moved entities and {} definitions share this symbol across packages",
+            orphan_indexes.len(),
+            candidate_indexes.len()
+        );
+        for orphan in orphan_indexes {
+            unresolved.insert(*orphan, (reason.clone(), files.clone()));
+        }
+    }
+
+    if !remaps.is_empty() {
+        let mut by_file: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (index, entry) in unclaimed.iter().enumerate() {
+            if !taken.contains(&index) {
+                by_file.entry(entry.file.as_str()).or_default().push(index);
+            }
+        }
+        let mut claims: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (orphan, (iri, _)) in orphans.iter().enumerate() {
+            if matched.contains_key(&orphan) {
+                continue;
+            }
+            let Some(target) = old_paths[orphan]
+                .as_deref()
+                .and_then(|old| remaps.iter().find_map(|remap| remap.apply(old)))
+            else {
+                continue;
+            };
+            let name = first_literal(iri, &terms.has_code_name)?.unwrap_or_default();
+            let mut candidates = by_file
+                .get(target.as_str())
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&candidate| desired_name(&unclaimed[candidate]) == name)
+                .collect::<Vec<_>>();
+            if candidates.len() > 1 {
+                if let Some(old_logical) = first_literal(iri, &terms.has_logical_path)? {
+                    candidates.retain(|&candidate| {
+                        symbols::logical_path(&unclaimed[candidate].symbol)
+                            .is_some_and(|new| one_ends_with_other(&old_logical, &new, "::"))
+                    });
+                }
+            }
+            match candidates.as_slice() {
+                [candidate] => claims.entry(*candidate).or_default().push(orphan),
+                [] => {
+                    let reason =
+                        format!("--remap maps it to {target}, which defines no unclaimed `{name}`");
+                    unresolved.insert(orphan, (reason, Vec::new()));
+                }
+                several => {
+                    let reason = format!(
+                        "--remap maps it to {target}, which defines {} unclaimed `{name}`",
+                        several.len()
+                    );
+                    unresolved.insert(orphan, (reason, vec![target.clone()]));
+                }
+            }
+        }
+        for (candidate, claimants) in claims {
+            if let [orphan] = claimants.as_slice() {
+                matched.insert(*orphan, (candidate, RehomeBasis::PathRemap));
+                unresolved.remove(orphan);
+            } else {
+                let reason = format!(
+                    "{} moved entities map to the same definition under --remap",
+                    claimants.len()
+                );
+                for orphan in claimants {
+                    unresolved.insert(
+                        orphan,
+                        (reason.clone(), vec![unclaimed[candidate].file.clone()]),
+                    );
+                }
+            }
+        }
+    }
+
+    let rehomes = matched
+        .into_iter()
+        .map(|(orphan, (candidate, basis))| Rehome {
+            iri: orphans[orphan].0.clone(),
+            old_symbol: orphans[orphan].1.clone(),
+            old_path: old_paths[orphan].clone(),
+            entry: unclaimed[candidate].clone(),
+            realizes: None,
+            basis,
+        })
+        .collect();
+    let unresolved = unresolved
+        .into_iter()
+        .map(|(orphan, (reason, candidates))| UnresolvedRehome {
+            iri: orphans[orphan].0.clone(),
+            old_symbol: orphans[orphan].1.clone(),
+            reason,
+            candidates,
+        })
+        .collect();
+    Ok((rehomes, unresolved))
+}
+
+/// True when the `sep`-separated segments of one path end with all of the
+/// other's: `src/rdf/x.rs` and `crates/trivyn-rdf/src/rdf/x.rs`, either way.
+fn one_ends_with_other(a: &str, b: &str, sep: &str) -> bool {
+    let a = a.split(sep).collect::<Vec<_>>();
+    let b = b.split(sep).collect::<Vec<_>>();
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    long.ends_with(&short)
+}
+
+/// Every predicate minting writes, plus the declared inverses of `realizes`:
+/// enrichment materializes `isRealizedBy` into the project graph, and without
+/// it every entity that realizes a component would look linked to knowledge.
+fn minted_predicates(state: &AppState, terms: &CodeTerms) -> anyhow::Result<BTreeSet<String>> {
+    let mut minted = [
+        moose::RDF_TYPE,
+        moose::RDFS_LABEL,
+        terms.has_substrate_symbol.as_str(),
+        terms.has_entity_kind.as_str(),
+        terms.has_code_name.as_str(),
+        terms.has_logical_path.as_str(),
+        terms.defined_in_path.as_str(),
+        terms.realizes.as_str(),
+    ]
+    .map(str::to_string)
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let realizes = NamedNodeRef::new(&terms.realizes)?;
+    let inverse_of = NamedNodeRef::new(super::util::OWL_INVERSE_OF)?;
+    for q in state
+        .store
+        .quads_for_pattern(Some(realizes.into()), Some(inverse_of), None, None)
+    {
+        if let Term::NamedNode(inverse) = q?.object {
+            minted.insert(inverse.into_string());
+        }
+    }
+    for q in state
+        .store
+        .quads_for_pattern(None, Some(inverse_of), Some(realizes.into()), None)
+    {
+        if let oxigraph::model::NamedOrBlankNode::NamedNode(inverse) = q?.subject {
+            minted.insert(inverse.into_string());
+        }
+    }
+    Ok(minted)
+}
+
+/// Links between an entity and other named nodes in the project graph, in
+/// both directions, excluding what minting itself writes. One entry per other
+/// node. Project graph only, like the prune tool (AD 43914c4e): session traces
+/// mention entity IRIs in answer text, which is history, not knowledge.
+fn knowledge_links(
+    state: &AppState,
+    minted: &BTreeSet<String>,
+    iri: &str,
+) -> anyhow::Result<Vec<KnowledgeLink>> {
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
+    let entity = NamedNodeRef::new(iri)?;
+    let mut links: BTreeMap<String, String> = BTreeMap::new();
+    for q in state.store.quads_for_pattern(
+        Some(entity.into()),
+        None,
+        None,
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        let q = q?;
+        if minted.contains(q.predicate.as_str()) {
+            continue;
+        }
+        if let Term::NamedNode(other) = q.object {
+            links
+                .entry(other.into_string())
+                .or_insert_with(|| q.predicate.into_string());
+        }
+    }
+    for q in state.store.quads_for_pattern(
+        None,
+        None,
+        Some(entity.into()),
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        let q = q?;
+        if minted.contains(q.predicate.as_str()) {
+            continue;
+        }
+        if let oxigraph::model::NamedOrBlankNode::NamedNode(other) = q.subject {
+            if other.as_str() != iri {
+                links
+                    .entry(other.into_string())
+                    .or_insert_with(|| q.predicate.into_string());
+            }
+        }
+    }
+    links
+        .into_iter()
+        .map(|(other, predicate)| {
+            let label = stored_literals(state, &other, moose::RDFS_LABEL)?
+                .into_iter()
+                .next();
+            Ok(KnowledgeLink {
+                predicate,
+                other,
+                label,
+            })
+        })
+        .collect()
 }
 
 /// Apply a mint plan in one transaction, then best-effort stamp provenance.
@@ -312,23 +753,38 @@ pub fn apply_mint(
             continue;
         };
         let subject = NamedNode::new(iri)?;
-        for (predicate_iri, desired) in desired_literal_values(terms, &planned.entry) {
-            if stored_literals(state, iri, &predicate_iri)? != literal_set(desired.as_ref()) {
-                removes.extend(predicate_quads(state, iri, &predicate_iri)?);
-                if let Some(value) = desired {
-                    inserts.push(literal_quad(&subject, &predicate_iri, value, &graph)?);
-                }
-            }
-        }
+        push_literal_updates(
+            state,
+            terms,
+            &subject,
+            &planned.entry,
+            &graph,
+            &mut inserts,
+            &mut removes,
+        )?;
         if let Some(component_iri) = planned.realizes.as_deref() {
-            inserts.push(Quad::new(
-                subject,
-                NamedNode::new(&terms.realizes)?,
-                NamedNode::new(component_iri)?,
-                GraphName::NamedNode(graph.clone()),
-            ));
+            inserts.push(realizes_quad(terms, &subject, component_iri, &graph)?);
         }
         updated += 1;
+    }
+
+    // A re-home keeps the IRI and rewrites identity in place. Its `realizes`
+    // is replaced, not topped up: the old edge was derived from the old path.
+    for rehome in &plan.rehome {
+        let subject = NamedNode::new(&rehome.iri)?;
+        push_literal_updates(
+            state,
+            terms,
+            &subject,
+            &rehome.entry,
+            &graph,
+            &mut inserts,
+            &mut removes,
+        )?;
+        removes.extend(predicate_quads(state, &rehome.iri, &terms.realizes)?);
+        if let Some(component_iri) = rehome.realizes.as_deref() {
+            inserts.push(realizes_quad(terms, &subject, component_iri, &graph)?);
+        }
     }
 
     commit_project_quads(state, &inserts, &removes, "code entity mint")?;
@@ -339,7 +795,48 @@ pub fn apply_mint(
         }
     }
 
-    Ok(ApplyOutcome { created, updated })
+    Ok(ApplyOutcome {
+        created,
+        updated,
+        rehomed: plan.rehome.len(),
+    })
+}
+
+/// Queue replacement quads for every mint literal that differs from `entry`.
+fn push_literal_updates(
+    state: &AppState,
+    terms: &CodeTerms,
+    subject: &NamedNode,
+    entry: &DefinitionEntry,
+    graph: &NamedNode,
+    inserts: &mut Vec<Quad>,
+    removes: &mut Vec<Quad>,
+) -> anyhow::Result<()> {
+    let iri = subject.as_str();
+    for (predicate_iri, desired) in desired_literal_values(terms, entry) {
+        if stored_literals(state, iri, &predicate_iri)? != literal_set(desired.as_ref()) {
+            removes.extend(predicate_quads(state, iri, &predicate_iri)?);
+            if let Some(value) = desired {
+                inserts.push(literal_quad(subject, &predicate_iri, value, graph)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One project-graph `realizes` edge from an entity to a component.
+fn realizes_quad(
+    terms: &CodeTerms,
+    subject: &NamedNode,
+    component_iri: &str,
+    graph: &NamedNode,
+) -> anyhow::Result<Quad> {
+    Ok(Quad::new(
+        subject.clone(),
+        NamedNode::new(&terms.realizes)?,
+        NamedNode::new(component_iri)?,
+        GraphName::NamedNode(graph.clone()),
+    ))
 }
 
 /// Lazily upsert one CodeEntity by normalized SCIP symbol.
@@ -693,6 +1190,51 @@ fn dedupe_collisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_remap_matches_whole_segments_only() {
+        let remap = PathRemap::parse("src/rdf/=crates/trivyn-rdf/src/rdf/").unwrap();
+        assert_eq!(
+            remap.apply("src/rdf/transform.rs").as_deref(),
+            Some("crates/trivyn-rdf/src/rdf/transform.rs")
+        );
+        assert_eq!(remap.apply("src/rdfx/a.rs"), None);
+        assert_eq!(remap.apply("other/src/rdf/a.rs"), None);
+        let file = PathRemap::parse("src/lib.rs=crates/core/src/lib.rs").unwrap();
+        assert_eq!(
+            file.apply("src/lib.rs").as_deref(),
+            Some("crates/core/src/lib.rs")
+        );
+        for bad in ["", "src", "=x", "x=", "/abs=x", "a/../b=c", "a=a/"] {
+            assert!(PathRemap::parse(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn suffix_move_needs_matching_trailing_segments() {
+        assert!(one_ends_with_other(
+            "src/rdf/x.rs",
+            "crates/trivyn-rdf/src/rdf/x.rs",
+            "/"
+        ));
+        assert!(one_ends_with_other("crates/a/src/x.rs", "src/x.rs", "/"));
+        assert!(!one_ends_with_other(
+            "crates/a/src/util.rs",
+            "crates/b/src/util.rs",
+            "/"
+        ));
+        assert!(!one_ends_with_other("src/rdf/x.rs", "src/ardf/x.rs", "/"));
+        assert!(one_ends_with_other(
+            "rdf::t::Thing::new",
+            "t::Thing::new",
+            "::"
+        ));
+        assert!(!one_ends_with_other(
+            "rdf::t::Thing::new",
+            "t::Other::new",
+            "::"
+        ));
+    }
 
     fn entry(symbol: &str, file: &str, is_module: bool, is_public: bool) -> DefinitionEntry {
         DefinitionEntry {

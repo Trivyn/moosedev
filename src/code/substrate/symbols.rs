@@ -4,7 +4,7 @@
 //! names may be backtick-escaped and contain spaces, so callers must not split
 //! raw symbol strings by hand.
 
-use scip::symbol::{format_symbol, parse_symbol};
+use scip::symbol::{format_symbol, format_symbol_with, parse_symbol, SymbolFormatOptions};
 use scip::types::descriptor;
 
 /// Normalized form of a SCIP symbol: the package version descriptor is elided
@@ -32,6 +32,30 @@ pub fn normalize_symbol(raw: &str) -> Option<String> {
         package.version.clear();
     }
     Some(format_symbol(symbol))
+}
+
+/// The normalized symbol with the package NAME elided as well as its version:
+/// what a definition keeps when it moves, unchanged, into another crate or
+/// package (issue #59). Used only to find a moved entity's successor, never as
+/// identity, because two packages may legitimately define the same descriptor
+/// path. None for syntactic (`ts:`) and local symbols, which carry no package.
+pub fn package_free_symbol(raw: &str) -> Option<String> {
+    if raw.starts_with("ts:") || ::scip::symbol::is_local_symbol(raw) {
+        return None;
+    }
+    let canonical = super::lang::canonical_symbol(raw);
+    let raw = canonical.as_deref().unwrap_or(raw);
+    let symbol = parse_symbol(raw).ok()?;
+    Some(format_symbol_with(
+        symbol,
+        SymbolFormatOptions {
+            include_scheme: true,
+            include_package_manager: true,
+            include_package_name: false,
+            include_package_version: false,
+            include_descriptor: true,
+        },
+    ))
 }
 
 /// Human-readable descriptor path, e.g. "runtime::build_server", derived from
@@ -333,5 +357,21 @@ mod tests {
         assert_eq!(last_descriptor_name(method).as_deref(), Some("render"));
         assert!(!is_module_symbol(method));
         assert!(is_module_symbol(module));
+    }
+
+    #[test]
+    fn package_free_symbol_matches_across_packages_only() {
+        let split = "rust-analyzer cargo moosedev-core 0.7.0 runtime/build_server().";
+        assert_eq!(
+            package_free_symbol(FUNCTION),
+            Some("rust-analyzer cargo runtime/build_server().".to_string())
+        );
+        assert_eq!(package_free_symbol(FUNCTION), package_free_symbol(split));
+        assert_ne!(
+            package_free_symbol(FUNCTION),
+            package_free_symbol("rust-analyzer cargo moosedev 0.6.3 runtime/other().")
+        );
+        assert_eq!(package_free_symbol("local 5"), None);
+        assert_eq!(package_free_symbol("ts:rust:src/a.rs:fn:a"), None);
     }
 }
