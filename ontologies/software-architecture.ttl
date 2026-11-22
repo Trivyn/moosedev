@@ -259,7 +259,7 @@ trivyn:confidence a owl:AnnotationProperty ;
     rdfs:subPropertyOf obo:BFO_0000176 {| trivyn:confidence "0.70"^^xsd:decimal ; trivyn:parentLabel "continuant part of" ; trivyn:rrfRank "2"^^xsd:integer ; skos:historyNote "Aligned to continuant part of via embedding similarity" ; dcterms:created "2026-06-17T15:28:08Z"^^xsd:dateTime |};
     skos:definition "Relates an information record, or a system component whose retirement or merge it explains, to its underlying reasoning.";
     skos:altLabel "has rationale";
-    skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." ;
+    skos:historyNote "Widened to system components 2026-11-21 with maintainer approval." ;
     rdfs:domain :InformationRecord ;
     dcam:domainIncludes :SystemComponent.
 :weighs a owl:ObjectProperty ;
@@ -280,7 +280,7 @@ trivyn:confidence a owl:AnnotationProperty ;
     rdfs:subPropertyOf prov:wasRevisionOf ;
     skos:definition "Relates an information record to the one it replaces, or a system component to a component merged into it.";
     skos:historyNote "Aligned to prov:wasRevisionOf 2026-09-12 (interoperability only; approved by the maintainer with :restates and :refines)." ;
-    skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." ;
+    skos:historyNote "Widened to system components 2026-11-21 with maintainer approval." ;
     rdfs:domain :InformationRecord ;
     rdfs:range :InformationRecord ;
     dcam:domainIncludes :SystemComponent ;
@@ -339,7 +339,7 @@ trivyn:confidence a owl:AnnotationProperty ;
       rdfs:range :InformationRecord ;
       dcam:rangeIncludes :SystemComponent ;
       skos:definition "Relates a rationale to the information record whose reasoning it provides, or to the system component whose retirement or merge it explains." ;
-      skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." ;
+      skos:historyNote "Widened to system components 2026-11-21 with maintainer approval." ;
       skos:altLabel "justifies" .
 
 :isWeighedBy a owl:ObjectProperty ;
@@ -366,7 +366,7 @@ trivyn:confidence a owl:AnnotationProperty ;
       dcam:domainIncludes :SystemComponent ;
       dcam:rangeIncludes :SystemComponent ;
       skos:definition "Relates an information record to the record that replaces it, or a system component to the component it was merged into." ;
-      skos:historyNote "Widened to SystemComponent 2026-11-21 with maintainer approval for issue #69 (component merge): a retired or merged component carries its Rationale, and a component merged into another is superseded by it. rdfs:domain/rdfs:range stay :InformationRecord because the query planner reads them; the component widening is declared with dcam:domainIncludes/rangeIncludes and the SHACL shapes (as hasLifecycleStatus is already carried by components)." .
+      skos:historyNote "Widened to system components 2026-11-21 with maintainer approval." .
 
 :isConstrainedBy a owl:ObjectProperty ;
       rdfs:label "is constrained by" ;
