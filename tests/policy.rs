@@ -593,12 +593,22 @@ fn component_constraint_linked_by_constrains_reaches_and_survives_the_push_bound
         .iri
         .clone()
         .expect("component IRI");
+    // alpha carries the component's records directly, so beta's shortened
+    // section is the first to list them as component context: the Constraint
+    // reaches beta only through `constrains` on the component.
     let rule = record(&f.state, "Constraint", "foo constrains rule", "accepted");
+    let decision = record(
+        &f.state,
+        "ArchitecturalDecision",
+        "foo constrains decision",
+        "accepted",
+    );
     graph::relate(&f.state, &rule, "constrains", &component).expect("constrains component");
-    for (title, entity) in [("alpha note", &f.alpha), ("beta note", &f.beta)] {
-        let lesson = record(&f.state, "Lesson", title, "accepted");
-        graph::relate(&f.state, &lesson, "concerns", entity).expect("concerns entity");
-    }
+    graph::relate(&f.state, &rule, "constrains", &f.alpha).expect("constrains alpha");
+    graph::relate(&f.state, &decision, "concerns", &component).expect("concerns component");
+    graph::relate(&f.state, &decision, "concerns", &f.alpha).expect("concerns alpha");
+    let lesson = record(&f.state, "Lesson", "beta note", "accepted");
+    graph::relate(&f.state, &lesson, "concerns", &f.beta).expect("concerns beta");
 
     let push = |max_bytes: Option<usize>| {
         let event = PolicyEvent::EntityTouched {
@@ -618,12 +628,31 @@ fn component_constraint_linked_by_constrains_reaches_and_survives_the_push_bound
     let whole = push(None);
     assert_eq!(
         whole.matches("- [Constraint] foo constrains rule").count(),
-        1,
+        2,
         "{whole}"
     );
+    assert_eq!(
+        whole
+            .matches("- [ArchitecturalDecision] foo constrains decision")
+            .count(),
+        2,
+        "{whole}"
+    );
+    // Under the bound beta's section is shortened: the accepted Constraint
+    // survives there, the ordinary component record does not.
     let bounded = push(Some(1));
-    assert!(
-        bounded.contains("- [Constraint] foo constrains rule"),
+    assert_eq!(
+        bounded
+            .matches("- [Constraint] foo constrains rule")
+            .count(),
+        2,
+        "{bounded}"
+    );
+    assert_eq!(
+        bounded
+            .matches("- [ArchitecturalDecision] foo constrains decision")
+            .count(),
+        1,
         "{bounded}"
     );
 }
