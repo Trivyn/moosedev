@@ -31073,7 +31073,6 @@
 <https://moosedev.dev/kg/SystemComponent/402e5c0b-dc22-4063-84c6-6b9dd954d540> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-04T06:01:57.460044Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#SystemComponent> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <http://www.w3.org/2000/01/rdf-schema#label> "MCP tool surface & server runtime" <https://moosedev.dev/kg/project> .
-<https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/bin/moosedev-harness.rs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/init.rs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/lib.rs" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/6baa075c-db0d-48e0-800a-0cae86603b2a> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/lsp/" <https://moosedev.dev/kg/project> .
@@ -31117,8 +31116,6 @@
 <https://moosedev.dev/kg/SystemComponent/ce49a867-7ebc-41d5-879c-fa59eed3ae65> <https://trivyn.io/ontologies/software/architecture#hasTimestamp> "2026-07-04T06:01:57.45998Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/e19120a8-38be-4995-b8a4-b2dabdafd0f2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://trivyn.io/ontologies/software/architecture#SystemComponent> <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/e19120a8-38be-4995-b8a4-b2dabdafd0f2> <http://www.w3.org/2000/01/rdf-schema#label> "active-agency policy engine" <https://moosedev.dev/kg/project> .
-<https://moosedev.dev/kg/SystemComponent/e19120a8-38be-4995-b8a4-b2dabdafd0f2> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/agent/" <https://moosedev.dev/kg/project> .
-<https://moosedev.dev/kg/SystemComponent/e19120a8-38be-4995-b8a4-b2dabdafd0f2> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/harness/" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/e19120a8-38be-4995-b8a4-b2dabdafd0f2> <https://trivyn.io/ontologies/software/architecture#coversPath> "src/policy/" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/e19120a8-38be-4995-b8a4-b2dabdafd0f2> <https://trivyn.io/ontologies/software/architecture#hasAuthor> "claude-code" <https://moosedev.dev/kg/project> .
 <https://moosedev.dev/kg/SystemComponent/e19120a8-38be-4995-b8a4-b2dabdafd0f2> <https://trivyn.io/ontologies/software/architecture#hasComponentName> "active-agency policy engine" <https://moosedev.dev/kg/project> .
