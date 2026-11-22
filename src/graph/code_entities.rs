@@ -454,6 +454,8 @@ pub fn plan_mint_with_remaps(
     };
 
     let mut orphans = Vec::new();
+    // Live syntactic anchors with the definition their identity names.
+    let mut live_syntactic = Vec::new();
     for (symbol, iri) in &existing {
         if substrate_symbols.contains(symbol) {
             if !in_scope.contains(symbol) {
@@ -463,12 +465,20 @@ pub fn plan_mint_with_remaps(
         }
         if symbol.starts_with("ts:") {
             // Syntactic anchors are orphaned only when the substrate can
-            // positively prove their declaration or file is gone.
-            if substrate
-                .and_then(|substrate| substrate.identity_alive(symbol))
-                .is_some_and(|alive| !alive)
-            {
-                orphans.push((iri.clone(), symbol.clone()));
+            // positively prove their declaration or file is gone. One it
+            // proves alive is not in `definitions` (fallback identities are
+            // synthesized on demand), so its link is checked below from the
+            // definition the identity names. Unverifiable ones are left alone.
+            match substrate.and_then(|substrate| substrate.identity_alive(symbol)) {
+                Some(false) => orphans.push((iri.clone(), symbol.clone())),
+                Some(true) => {
+                    if let Some(entry) =
+                        substrate.and_then(|substrate| substrate.definition_for_symbol(symbol))
+                    {
+                        live_syntactic.push((iri.clone(), entry));
+                    }
+                }
+                None => {}
             }
             continue;
         }
@@ -527,39 +537,43 @@ pub fn plan_mint_with_remaps(
         }
     }
 
-    // Out-of-scope entities (lazily minted private code) are never created or
-    // updated here, but a link minted from coverage that has since changed is
-    // as stale on them as on any other. Their file is the live definition's,
-    // picked with minting's own tie-break. One without a link is left alone:
-    // lazy minting decides whether it gets one.
-    if !plan.out_of_scope.is_empty() {
-        let out_of_scope = plan
-            .out_of_scope
+    // Lazily minted entities (out-of-scope private code, live syntactic
+    // anchors) are never created or updated here, but a link minted from
+    // coverage that has since changed is as stale on them as on any other.
+    // Their file is the live definition's, picked with minting's own
+    // tie-break. One without a link is left alone: lazy minting decides
+    // whether it gets one.
+    let out_of_scope = plan
+        .out_of_scope
+        .iter()
+        .map(|(_, symbol)| symbol.as_str())
+        .collect::<BTreeSet<_>>();
+    let (live, _) = dedupe_collisions(
+        definitions
             .iter()
-            .map(|(_, symbol)| symbol.as_str())
-            .collect::<BTreeSet<_>>();
-        let (live, _) = dedupe_collisions(
-            definitions
-                .iter()
-                .filter(|entry| out_of_scope.contains(entry.normalized_symbol.as_str()))
-                .cloned()
-                .collect(),
-        );
-        for entry in live {
-            let Some(iri) = existing.get(&entry.normalized_symbol) else {
-                continue;
-            };
-            let stored = links.asserted_targets(state, iri)?;
-            let mapped = component_iri_for_path(&entry.file, components);
-            if realizes_is_stale(&stored, mapped) {
-                stale.push((
-                    iri.clone(),
-                    entry.normalized_symbol,
-                    entry.file.clone(),
-                    stored,
-                    realizes_target(components, &entry.file),
-                ));
-            }
+            .filter(|entry| out_of_scope.contains(entry.normalized_symbol.as_str()))
+            .cloned()
+            .collect(),
+    );
+    let lazy = live
+        .into_iter()
+        .filter_map(|entry| {
+            existing
+                .get(&entry.normalized_symbol)
+                .map(|iri| (iri.clone(), entry))
+        })
+        .chain(live_syntactic);
+    for (iri, entry) in lazy {
+        let stored = links.asserted_targets(state, &iri)?;
+        let mapped = component_iri_for_path(&entry.file, components);
+        if realizes_is_stale(&stored, mapped) {
+            stale.push((
+                iri,
+                entry.normalized_symbol,
+                entry.file.clone(),
+                stored,
+                realizes_target(components, &entry.file),
+            ));
         }
     }
     if !stale.is_empty() {
@@ -1244,9 +1258,11 @@ impl RealizesLinks {
     }
 
     /// Queue the writes that leave `entity` with exactly one asserted
-    /// `realizes` link, to `to`, or none. A link to any other component goes in
-    /// both stored orientations, so no stored inverse keeps it alive. `untag`
-    /// collects the quads whose reasoner-inference tags must go too.
+    /// `realizes` link, to `to`, or none. For every other component it
+    /// asserts, each quad linking the two by `realizes` or a declared inverse
+    /// goes, in either orientation, asserted or reasoner-materialized, as
+    /// `unrelate` does: nothing of the old link survives until the next
+    /// enrichment. `untag` collects the quads whose inference tags must go too.
     fn push_replacement(
         &self,
         state: &AppState,
@@ -1257,12 +1273,30 @@ impl RealizesLinks {
         untag: &mut Vec<Quad>,
     ) -> anyhow::Result<()> {
         let mut kept = false;
-        for (component, quad) in self.asserted(state, entity)? {
+        let mut old = BTreeSet::new();
+        for (component, _) in self.asserted(state, entity)? {
             if Some(component.as_str()) == to {
                 kept = true;
             } else {
-                untag.push(quad.clone());
-                removes.push(quad);
+                old.insert(component.into_string());
+            }
+        }
+        let graph = GraphName::NamedNode(self.graph.clone());
+        for component in old {
+            let component = NamedNode::new(component)?;
+            for predicate in std::iter::once(&self.realizes).chain(&self.inverses) {
+                for (subject, object) in [(entity, &component), (&component, entity)] {
+                    let quad = Quad::new(
+                        subject.clone(),
+                        predicate.clone(),
+                        object.clone(),
+                        graph.clone(),
+                    );
+                    if state.store.contains(&quad)? {
+                        untag.push(quad.clone());
+                        removes.push(quad);
+                    }
+                }
             }
         }
         if let (Some(to), false) = (to, kept) {
@@ -1270,7 +1304,7 @@ impl RealizesLinks {
                 entity.clone(),
                 self.realizes.clone(),
                 NamedNode::new(to)?,
-                GraphName::NamedNode(self.graph.clone()),
+                graph,
             );
             // Present but not asserted means reasoner-materialized: asserting
             // it must drop the inference tag, or the next enrichment clears it.

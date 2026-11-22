@@ -1272,6 +1272,24 @@ fn repointing_removes_stored_inverses_and_reasoner_copies() {
     assert_eq!(from, expected);
 
     graph::apply_mint(&state, &plan, &terms).unwrap();
+    // Gone in the apply itself, reasoner copies and their tags included, not
+    // only after the next enrichment.
+    for old in [&a, &legacy] {
+        assert!(
+            !linked_either_way(&state, &entity, old),
+            "linked to {old} before enrichment"
+        );
+    }
+    let tagged =
+        moosedev::provenance::reasoner_inferred_data_quads(&state.store, PROJECT_KG_GRAPH_IRI)
+            .unwrap();
+    assert!(
+        !tagged.iter().any(|quad| {
+            let text = quad.to_string();
+            text.contains(&entity) && (text.contains(&a) || text.contains(&legacy))
+        }),
+        "an inference tag of a removed link survived: {tagged:?}"
+    );
     state.ensure_enriched();
     for old in [&a, &legacy] {
         assert!(!linked_either_way(&state, &entity, old), "linked to {old}");
@@ -1299,4 +1317,55 @@ fn repointing_removes_stored_inverses_and_reasoner_copies() {
     );
     assert!(plan_with(&state, defs, &[]).realizes_changes.is_empty());
     assert!(validation::validate_project(&state).unwrap().conforms());
+}
+
+/// A live tree-sitter fallback entity is never in `definitions`, but its link
+/// goes stale like any other; one the substrate cannot verify is left alone.
+#[test]
+fn a_live_syntactic_entity_with_a_stale_link_is_repointed() {
+    let state = bootstrap("realizes-syntactic");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let a = seed_component(&state, "fixtures", "tests/fixtures/");
+    let b = seed_component(&state, "fallback code", "other/");
+    let repo_root = state.data_dir.join("fixture-repo");
+    let fixture_path = repo_root.join("tests/fixtures/ts_fallback.rs");
+    std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+    std::fs::write(&fixture_path, include_str!("fixtures/ts_fallback.rs")).unwrap();
+    let substrate = Substrate::from_index_rooted(Index::new(), substrate_meta(), false, repo_root)
+        .expect("rooted substrate");
+    let identity = "ts:rust:tests/fixtures/ts_fallback.rs:fn:<Widget as Render>::render";
+    let entry = substrate
+        .definition_for_symbol(identity)
+        .expect("the fixture declaration is alive");
+    let components = graph::load_components(&state).unwrap();
+    let entity = graph::ensure_entity(&state, &terms, &components, &entry, "tester")
+        .unwrap()
+        .iri;
+    assert_eq!(realized(&state, &entity), vec![a.clone()]);
+
+    undeclare(&state, &a, "tests/fixtures/");
+    declare(&state, &b, "tests/fixtures/");
+    let components = graph::load_components(&state).unwrap();
+    let unverifiable = graph::plan_mint(&state, &[], &terms, &components, None).unwrap();
+    assert!(
+        unverifiable.realizes_changes.is_empty(),
+        "without a substrate the anchor cannot be verified, so it is left alone"
+    );
+    let plan = graph::plan_mint(&state, &[], &terms, &components, Some(&substrate)).unwrap();
+    assert!(plan.orphaned.is_empty());
+    assert_eq!(
+        plan.realizes_changes,
+        vec![graph::RealizesChange {
+            entity_iri: entity.clone(),
+            symbol: identity.to_string(),
+            file: "tests/fixtures/ts_fallback.rs".to_string(),
+            from: vec![named(&a, "fixtures")],
+            to: Some(named(&b, "fallback code")),
+        }]
+    );
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!(realized(&state, &entity), vec![b]);
+    let again = graph::plan_mint(&state, &[], &terms, &components, Some(&substrate)).unwrap();
+    assert!(again.realizes_changes.is_empty());
 }
