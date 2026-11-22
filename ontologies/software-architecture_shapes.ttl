@@ -157,9 +157,7 @@ shape:PatternShape a sh:NodeShape ;
 
 shape:RationaleShape a sh:NodeShape ;
     sh:targetClass domain:Rationale ;
-    # SystemComponent added with the isRationaleFor range widening (issue #69,
-    # 2026-11-21): the reasoner materializes the inverse of a retired
-    # component's hasRationale.
+    # A rationale may also explain a system component's retirement or merge.
     sh:property [
         sh:path domain:isRationaleFor ;
         sh:or (
@@ -187,9 +185,8 @@ shape:SystemComponentShape a sh:NodeShape ;
         sh:path domain:isConcernedBy ;
         sh:class domain:InformationRecord
     ] ;
-    # Component lifecycle (issue #69, maintainer-approved 2026-11-21): a merge is
-    # type-preserving, so a component supersedes and is superseded only by a
-    # component; a retired or merged component carries its Rationale.
+    # A component supersedes, and is superseded by, only another component;
+    # a retired or merged component carries its rationale.
     sh:property [
         sh:path domain:supersedes ;
         sh:class domain:SystemComponent
