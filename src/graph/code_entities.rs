@@ -3,15 +3,18 @@
 //! The code substrate is regenerated freely; this module mints only the durable
 //! CodeEntity continuants keyed by normalized SCIP symbol.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use oxigraph::model::{GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad, Term};
+use oxigraph::model::{
+    GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, Term,
+};
 
 pub(crate) use crate::code::substrate::is_test_path;
 use crate::code::substrate::{symbols, DefinitionEntry, Substrate};
 use crate::provenance;
 
-use super::components::{best_component_for_path, ComponentEntry};
+use super::components::{best_component_for_path, load_all_components, ComponentEntry};
+use super::lifecycle::declared_inverses;
 use super::state::AppState;
 use super::util::mint_instance_iri;
 use super::PROJECT_KG_GRAPH_IRI;
@@ -48,7 +51,8 @@ pub struct PlannedEntity {
     pub entry: DefinitionEntry,
     /// Some = existing entity (updates), None = create.
     pub iri: Option<String>,
-    /// Component IRI to link, when applicable.
+    /// Component IRI to link. On an update, set only when the entity has no
+    /// `realizes` link yet; a link that is wrong is a [`RealizesChange`].
     pub realizes: Option<String>,
 }
 
@@ -75,7 +79,13 @@ pub struct SymbolCollision {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MintPlan {
     pub create: Vec<PlannedEntity>,
+    /// Managed entities whose identity literals change, or that gain their
+    /// first `realizes` link. A wrong link is not an update: it is listed in
+    /// `realizes_changes`, so an entity is in both only when its literals
+    /// changed too.
     pub update: Vec<PlannedEntity>,
+    /// Managed entities with nothing to write: literals current and the
+    /// `realizes` link the one path coverage picks.
     pub unchanged: usize,
     pub skipped_scope: usize,
     pub skipped_tests: usize,
@@ -108,6 +118,104 @@ pub struct MintPlan {
     /// links to or from: those links. These are records whose code anchor
     /// is gone, so a dossier at the code's new location will not show them.
     pub orphan_links: BTreeMap<String, Vec<KnowledgeLink>>,
+    /// Stored `realizes` links that current path coverage contradicts, on
+    /// managed and out-of-scope entities alike, ordered by symbol. Coverage
+    /// changes (a path moved, a more specific component, a retirement) never
+    /// touch the entities, so without this the stored links go stale.
+    pub realizes_changes: Vec<RealizesChange>,
+}
+
+/// A stored `realizes` link replaced by the one path coverage picks now.
+/// Applying it leaves the entity with exactly one asserted link, to `to`, or
+/// none: the dossier already treats a file no component covers as having none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealizesChange {
+    pub entity_iri: String,
+    pub symbol: String,
+    pub file: String,
+    /// `(iri, name)` of every component the entity asserts it realizes now,
+    /// retired ones included; the name falls back to the IRI.
+    pub from: Vec<(String, String)>,
+    /// `(iri, name)` of the component covering `file` now; `None` drops the link.
+    pub to: Option<(String, String)>,
+}
+
+impl MintPlan {
+    /// Stored links re-pointed to another component.
+    pub fn realizes_moved(&self) -> usize {
+        self.realizes_changes
+            .iter()
+            .filter(|change| change.to.is_some())
+            .count()
+    }
+
+    /// Stored links dropped because no current component covers the file.
+    pub fn realizes_dropped(&self) -> usize {
+        self.realizes_changes.len() - self.realizes_moved()
+    }
+
+    /// The report's `summary:` line. Fields are only ever appended, so scripts
+    /// that read it by position keep working.
+    pub fn summary_line(&self) -> String {
+        format!(
+            "summary: create={} update={} unchanged={} rehome={} not-rehomed={} skipped-scope={} \
+             skipped-tests={} collisions={} unmapped={} orphaned={} orphaned-with-knowledge={} \
+             out-of-scope={} realizes-moved={} realizes-dropped={}",
+            self.create.len(),
+            self.update.len(),
+            self.unchanged,
+            self.rehome.len(),
+            self.unresolved_rehomes.len(),
+            self.skipped_scope,
+            self.skipped_tests,
+            self.collisions.len(),
+            self.unmapped_paths.len(),
+            self.orphaned.len(),
+            self.orphan_links.len(),
+            self.out_of_scope.len(),
+            self.realizes_moved(),
+            self.realizes_dropped()
+        )
+    }
+
+    /// The report section for `realizes_changes`: one group per `from -> to`,
+    /// with its count and every entity in it. Empty when there are none.
+    pub fn realizes_report(&self) -> Vec<String> {
+        let mut groups: BTreeMap<(String, String), Vec<&RealizesChange>> = BTreeMap::new();
+        for change in &self.realizes_changes {
+            let from = change
+                .from
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let to = change.to.as_ref().map_or_else(
+                || "(none: no current component covers the file)".to_string(),
+                |(_, name)| name.clone(),
+            );
+            groups.entry((from, to)).or_default().push(change);
+        }
+        let mut lines = Vec::new();
+        if groups.is_empty() {
+            return lines;
+        }
+        lines.push("realizes links that no longer match component coverage:".to_string());
+        for ((from, to), changes) in groups {
+            let noun = if changes.len() == 1 {
+                "entity"
+            } else {
+                "entities"
+            };
+            lines.push(format!("  {from} -> {to}: {} {noun}", changes.len()));
+            for change in changes {
+                lines.push(format!(
+                    "    {} ({}) {}",
+                    change.symbol, change.file, change.entity_iri
+                ));
+            }
+        }
+        lines
+    }
 }
 
 /// How a moved entity's successor was identified.
@@ -206,6 +314,8 @@ pub struct ApplyOutcome {
     pub created: Vec<(String, String)>,
     pub updated: usize,
     pub rehomed: usize,
+    pub realizes_moved: usize,
+    pub realizes_dropped: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +454,8 @@ pub fn plan_mint_with_remaps(
     };
 
     let mut orphans = Vec::new();
+    // Live syntactic anchors with the definition their identity names.
+    let mut live_syntactic = Vec::new();
     for (symbol, iri) in &existing {
         if substrate_symbols.contains(symbol) {
             if !in_scope.contains(symbol) {
@@ -353,12 +465,20 @@ pub fn plan_mint_with_remaps(
         }
         if symbol.starts_with("ts:") {
             // Syntactic anchors are orphaned only when the substrate can
-            // positively prove their declaration or file is gone.
-            if substrate
-                .and_then(|substrate| substrate.identity_alive(symbol))
-                .is_some_and(|alive| !alive)
-            {
-                orphans.push((iri.clone(), symbol.clone()));
+            // positively prove their declaration or file is gone. One it
+            // proves alive is not in `definitions` (fallback identities are
+            // synthesized on demand), so its link is checked below from the
+            // definition the identity names. Unverifiable ones are left alone.
+            match substrate.and_then(|substrate| substrate.identity_alive(symbol)) {
+                Some(false) => orphans.push((iri.clone(), symbol.clone())),
+                Some(true) => {
+                    if let Some(entry) =
+                        substrate.and_then(|substrate| substrate.definition_for_symbol(symbol))
+                    {
+                        live_syntactic.push((iri.clone(), entry));
+                    }
+                }
+                None => {}
             }
             continue;
         }
@@ -372,6 +492,9 @@ pub fn plan_mint_with_remaps(
         .map(|rehome| rehome.entry.normalized_symbol.as_str())
         .collect::<BTreeSet<_>>();
 
+    let links = RealizesLinks::load(state, terms)?;
+    // (entity, symbol, file, stored targets, target now) for every stale link.
+    let mut stale = Vec::new();
     for entry in kept {
         let mapped_iri = component_iri_for_path(&entry.file, components).map(str::to_string);
         if mapped_iri.is_none() {
@@ -389,22 +512,99 @@ pub fn plan_mint_with_remaps(
             }),
             Some(iri) => {
                 let needs_literal_update = literals_differ(state, terms, iri, &entry)?;
-                let realizes = if has_realizes(state, terms, iri)? {
-                    None
-                } else {
-                    mapped_iri
-                };
+                let stored = links.asserted_targets(state, iri)?;
+                let is_stale = realizes_is_stale(&stored, mapped_iri.as_deref());
+                let realizes = if stored.is_empty() { mapped_iri } else { None };
+                if is_stale {
+                    stale.push((
+                        iri.clone(),
+                        entry.normalized_symbol.clone(),
+                        entry.file.clone(),
+                        stored,
+                        realizes_target(components, &entry.file),
+                    ));
+                }
                 if needs_literal_update || realizes.is_some() {
                     plan.update.push(PlannedEntity {
                         entry,
                         iri: Some(iri.clone()),
                         realizes,
                     });
-                } else {
+                } else if !is_stale {
                     plan.unchanged += 1;
                 }
             }
         }
+    }
+
+    // Lazily minted entities (out-of-scope private code, live syntactic
+    // anchors) are never created or updated here, but a link minted from
+    // coverage that has since changed is as stale on them as on any other.
+    // Their file is the live definition's, picked with minting's own
+    // tie-break. One without a link is left alone: lazy minting decides
+    // whether it gets one.
+    let out_of_scope = plan
+        .out_of_scope
+        .iter()
+        .map(|(_, symbol)| symbol.as_str())
+        .collect::<BTreeSet<_>>();
+    let (live, _) = dedupe_collisions(
+        definitions
+            .iter()
+            .filter(|entry| out_of_scope.contains(entry.normalized_symbol.as_str()))
+            .cloned()
+            .collect(),
+    );
+    let lazy = live
+        .into_iter()
+        .filter_map(|entry| {
+            existing
+                .get(&entry.normalized_symbol)
+                .map(|iri| (iri.clone(), entry))
+        })
+        .chain(live_syntactic);
+    for (iri, entry) in lazy {
+        let stored = links.asserted_targets(state, &iri)?;
+        let mapped = component_iri_for_path(&entry.file, components);
+        if realizes_is_stale(&stored, mapped) {
+            stale.push((
+                iri,
+                entry.normalized_symbol,
+                entry.file.clone(),
+                stored,
+                realizes_target(components, &entry.file),
+            ));
+        }
+    }
+    if !stale.is_empty() {
+        // Stored targets may be retired, which the current set leaves out.
+        let all = load_all_components(state)?;
+        let name_of = |iri: &str| {
+            all.iter()
+                .find(|component| component.iri.as_deref() == Some(iri))
+                .map_or_else(|| iri.to_string(), |component| component.name.clone())
+        };
+        plan.realizes_changes = stale
+            .into_iter()
+            .map(|(entity_iri, symbol, file, stored, to)| RealizesChange {
+                entity_iri,
+                symbol,
+                file,
+                from: stored
+                    .into_iter()
+                    .map(|iri| {
+                        let name = name_of(&iri);
+                        (iri, name)
+                    })
+                    .collect(),
+                to,
+            })
+            .collect();
+        plan.realizes_changes.sort_by(|a, b| {
+            a.symbol
+                .cmp(&b.symbol)
+                .then(a.entity_iri.cmp(&b.entity_iri))
+        });
     }
 
     let rehomed_iris = rehome
@@ -735,6 +935,13 @@ pub fn apply_mint(
     let mut updated = 0usize;
     let mut inserts = Vec::new();
     let mut removes = Vec::new();
+    let mut untag = Vec::new();
+
+    // Held from the inferred-quad read through the stale flag, so no
+    // enrichment computed from the old graph can commit in between and
+    // restore a removed link.
+    let enrich_guard = state.lock_enrichment();
+    let links = RealizesLinks::load(state, terms)?;
 
     for planned in &plan.create {
         let iri = mint_instance_iri("CodeEntity");
@@ -763,9 +970,27 @@ pub fn apply_mint(
             &mut removes,
         )?;
         if let Some(component_iri) = planned.realizes.as_deref() {
-            inserts.push(realizes_quad(terms, &subject, component_iri, &graph)?);
+            links.push_replacement(
+                state,
+                &subject,
+                Some(component_iri),
+                &mut inserts,
+                &mut removes,
+                &mut untag,
+            )?;
         }
         updated += 1;
+    }
+
+    for change in &plan.realizes_changes {
+        links.push_replacement(
+            state,
+            &NamedNode::new(&change.entity_iri)?,
+            change.to.as_ref().map(|(iri, _)| iri.as_str()),
+            &mut inserts,
+            &mut removes,
+            &mut untag,
+        )?;
     }
 
     // A re-home keeps the IRI and rewrites identity in place. Its `realizes`
@@ -781,13 +1006,27 @@ pub fn apply_mint(
             &mut inserts,
             &mut removes,
         )?;
-        removes.extend(predicate_quads(state, &rehome.iri, &terms.realizes)?);
-        if let Some(component_iri) = rehome.realizes.as_deref() {
-            inserts.push(realizes_quad(terms, &subject, component_iri, &graph)?);
-        }
+        links.push_replacement(
+            state,
+            &subject,
+            rehome.realizes.as_deref(),
+            &mut inserts,
+            &mut removes,
+            &mut untag,
+        )?;
     }
 
+    // Drop the inference tags of the links going away (a stale tag would mark
+    // a later re-assertion as inferred) and of the ones being asserted.
+    if !untag.is_empty() {
+        removes.extend(provenance::reasoner_inference_provenance_for(
+            &state.store,
+            PROJECT_KG_GRAPH_IRI,
+            &untag,
+        )?);
+    }
     commit_project_quads(state, &inserts, &removes, "code entity mint")?;
+    drop(enrich_guard);
 
     for iri in &created_iris {
         if let Err(e) = provenance::record_provenance(&state.store, iri, "moosedev-mint") {
@@ -799,6 +1038,8 @@ pub fn apply_mint(
         created,
         updated,
         rehomed: plan.rehome.len(),
+        realizes_moved: plan.realizes_moved(),
+        realizes_dropped: plan.realizes_dropped(),
     })
 }
 
@@ -822,21 +1063,6 @@ fn push_literal_updates(
         }
     }
     Ok(())
-}
-
-/// One project-graph `realizes` edge from an entity to a component.
-fn realizes_quad(
-    terms: &CodeTerms,
-    subject: &NamedNode,
-    component_iri: &str,
-    graph: &NamedNode,
-) -> anyhow::Result<Quad> {
-    Ok(Quad::new(
-        subject.clone(),
-        NamedNode::new(&terms.realizes)?,
-        NamedNode::new(component_iri)?,
-        GraphName::NamedNode(graph.clone()),
-    ))
 }
 
 /// Lazily upsert one CodeEntity by normalized SCIP symbol.
@@ -931,6 +1157,164 @@ fn commit_project_quads(
 /// Return a component IRI for a path, preserving `None` for unmapped paths.
 fn component_iri_for_path<'a>(path: &str, components: &'a [ComponentEntry]) -> Option<&'a str> {
     best_component_for_path(path, components).and_then(|component| component.iri.as_deref())
+}
+
+/// `(iri, name)` of the component a path maps to, for a [`RealizesChange`].
+fn realizes_target(components: &[ComponentEntry], path: &str) -> Option<(String, String)> {
+    best_component_for_path(path, components).and_then(|component| {
+        component
+            .iri
+            .clone()
+            .map(|iri| (iri, component.name.clone()))
+    })
+}
+
+/// True when stored links exist and are not exactly the one coverage picks.
+/// No stored link is not stale: a managed entity gains one as an update.
+fn realizes_is_stale(stored: &BTreeSet<String>, mapped: Option<&str>) -> bool {
+    match (stored.len(), mapped) {
+        (0, _) => false,
+        (1, Some(mapped)) => !stored.contains(mapped),
+        _ => true,
+    }
+}
+
+/// What telling an asserted `realizes` link from a derived one takes: the
+/// property, its declared inverses, and the quads the reasoner materialized.
+struct RealizesLinks {
+    realizes: NamedNode,
+    inverses: Vec<NamedNode>,
+    inferred: HashSet<Quad>,
+    graph: NamedNode,
+}
+
+impl RealizesLinks {
+    fn load(state: &AppState, terms: &CodeTerms) -> anyhow::Result<Self> {
+        Ok(Self {
+            realizes: NamedNode::new(&terms.realizes)?,
+            inverses: declared_inverses(state, &terms.realizes)?
+                .into_iter()
+                .map(NamedNode::new)
+                .collect::<Result<_, _>>()?,
+            inferred: provenance::reasoner_inferred_data_quads(&state.store, PROJECT_KG_GRAPH_IRI)?
+                .into_iter()
+                .collect(),
+            graph: NamedNode::new(PROJECT_KG_GRAPH_IRI)?,
+        })
+    }
+
+    /// Every asserted quad linking `entity` to a component by `realizes`, in
+    /// either stored orientation, with that component. Reasoner-materialized
+    /// copies are not assertions; enrichment rebuilds or drops them.
+    fn asserted(
+        &self,
+        state: &AppState,
+        entity: &NamedNode,
+    ) -> anyhow::Result<Vec<(NamedNode, Quad)>> {
+        let graph = GraphNameRef::NamedNode(self.graph.as_ref());
+        let mut out = Vec::new();
+        for quad in state.store.quads_for_pattern(
+            Some(entity.as_ref().into()),
+            Some(self.realizes.as_ref()),
+            None,
+            Some(graph),
+        ) {
+            let quad = quad?;
+            if let Term::NamedNode(component) = &quad.object {
+                if !self.inferred.contains(&quad) {
+                    out.push((component.clone(), quad));
+                }
+            }
+        }
+        for inverse in &self.inverses {
+            for quad in state.store.quads_for_pattern(
+                None,
+                Some(inverse.as_ref()),
+                Some(entity.as_ref().into()),
+                Some(graph),
+            ) {
+                let quad = quad?;
+                if let NamedOrBlankNode::NamedNode(component) = &quad.subject {
+                    if !self.inferred.contains(&quad) {
+                        out.push((component.clone(), quad));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The components `entity_iri` asserts it realizes, in either orientation.
+    fn asserted_targets(
+        &self,
+        state: &AppState,
+        entity_iri: &str,
+    ) -> anyhow::Result<BTreeSet<String>> {
+        Ok(self
+            .asserted(state, &NamedNode::new(entity_iri)?)?
+            .into_iter()
+            .map(|(component, _)| component.into_string())
+            .collect())
+    }
+
+    /// Queue the writes that leave `entity` with exactly one asserted
+    /// `realizes` link, to `to`, or none. For every other component it
+    /// asserts, each quad linking the two by `realizes` or a declared inverse
+    /// goes, in either orientation, asserted or reasoner-materialized, as
+    /// `unrelate` does: nothing of the old link survives until the next
+    /// enrichment. `untag` collects the quads whose inference tags must go too.
+    fn push_replacement(
+        &self,
+        state: &AppState,
+        entity: &NamedNode,
+        to: Option<&str>,
+        inserts: &mut Vec<Quad>,
+        removes: &mut Vec<Quad>,
+        untag: &mut Vec<Quad>,
+    ) -> anyhow::Result<()> {
+        let mut kept = false;
+        let mut old = BTreeSet::new();
+        for (component, _) in self.asserted(state, entity)? {
+            if Some(component.as_str()) == to {
+                kept = true;
+            } else {
+                old.insert(component.into_string());
+            }
+        }
+        let graph = GraphName::NamedNode(self.graph.clone());
+        for component in old {
+            let component = NamedNode::new(component)?;
+            for predicate in std::iter::once(&self.realizes).chain(&self.inverses) {
+                for (subject, object) in [(entity, &component), (&component, entity)] {
+                    let quad = Quad::new(
+                        subject.clone(),
+                        predicate.clone(),
+                        object.clone(),
+                        graph.clone(),
+                    );
+                    if state.store.contains(&quad)? {
+                        untag.push(quad.clone());
+                        removes.push(quad);
+                    }
+                }
+            }
+        }
+        if let (Some(to), false) = (to, kept) {
+            let quad = Quad::new(
+                entity.clone(),
+                self.realizes.clone(),
+                NamedNode::new(to)?,
+                graph,
+            );
+            // Present but not asserted means reasoner-materialized: asserting
+            // it must drop the inference tag, or the next enrichment clears it.
+            if state.store.contains(&quad)? {
+                untag.push(quad.clone());
+            }
+            inserts.push(quad);
+        }
+        Ok(())
+    }
 }
 
 /// Build one project-graph literal quad for an existing named subject.
@@ -1085,24 +1469,6 @@ fn predicate_quads(
         )
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
-}
-
-/// Return whether a CodeEntity already has any authoritative `realizes` edge.
-fn has_realizes(state: &AppState, terms: &CodeTerms, iri: &str) -> anyhow::Result<bool> {
-    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let subject = NamedNodeRef::new(iri)?;
-    let predicate = NamedNodeRef::new(&terms.realizes)?;
-    Ok(state
-        .store
-        .quads_for_pattern(
-            Some(subject.into()),
-            Some(predicate),
-            None,
-            Some(GraphNameRef::NamedNode(graph)),
-        )
-        .next()
-        .transpose()?
-        .is_some())
 }
 
 /// True when the substrate holds at least one definition batch minting would

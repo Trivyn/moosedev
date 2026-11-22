@@ -168,6 +168,14 @@ possible successor is listed under "not re-homed". Entities whose code is gone
 are listed as orphaned, and the ones that records still point at are listed with
 those records, so they can be relinked with `link_code`.
 
+Each code entity is linked to the component that covers its file. When
+component coverage changes (a path moves to another component, a more specific
+component is declared, a component is retired), `mint` re-points each entity's
+link to the component that covers its file now, and drops links that no
+current component covers. A hand-set link that disagrees with path coverage is
+replaced the same way. The dry run lists every change, grouped by old and new
+component.
+
 Run `moosedev index` after significant source changes. `moosedev init` can
 install a post-commit refresh hook. To debug position resolution, use 1-based
 line numbers and UTF-8 byte columns:

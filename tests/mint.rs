@@ -710,6 +710,9 @@ fn crate_split_rehomes_entity_in_place_and_keeps_its_links() {
     );
     let entity = mint_all(&state, std::slice::from_ref(&old))[&old.normalized_symbol].clone();
     assert!(has_edge(&state, &entity, &terms.realizes, &core));
+    // A stored inverse of the old link: left behind, enrichment would
+    // re-derive the forward edge from it.
+    insert_edge(&state, &core, &is_realized_by(&state), &entity);
     let constraint = record(&state, "Constraint", "Transforms are pure");
     graph::relate(&state, &constraint, "constrains", &entity).unwrap();
 
@@ -732,9 +735,17 @@ fn crate_split_rehomes_entity_in_place_and_keeps_its_links() {
         "the successor must not be minted fresh"
     );
     assert!(plan.orphaned.is_empty());
+    assert!(
+        plan.realizes_changes.is_empty(),
+        "the re-home writes the new link itself: {:?}",
+        plan.realizes_changes
+    );
 
     let outcome = graph::apply_mint(&state, &plan, &terms).unwrap();
     assert_eq!(outcome.rehomed, 1);
+    assert_eq!((outcome.realizes_moved, outcome.realizes_dropped), (0, 0));
+    state.ensure_enriched();
+    assert!(!linked_either_way(&state, &entity, &core));
     let after = graph::entities_by_symbol(&state, &terms).unwrap();
     assert_eq!(after.get(&moved.normalized_symbol), Some(&entity));
     assert!(!after.contains_key(&old.normalized_symbol));
@@ -901,4 +912,460 @@ fn enrichment_inverses_are_not_reported_as_recorded_knowledge() {
         "a component realization is not recorded knowledge: {:?}",
         plan.orphan_links
     );
+}
+
+/// Insert one project-graph object edge, bypassing every write-path check.
+fn insert_edge(state: &AppState, subject: &str, predicate: &str, object: &str) {
+    state
+        .store
+        .insert(&Quad::new(
+            NamedNode::new(subject).unwrap(),
+            NamedNode::new(predicate).unwrap(),
+            NamedNode::new(object).unwrap(),
+            GraphName::NamedNode(NamedNode::new(PROJECT_KG_GRAPH_IRI).unwrap()),
+        ))
+        .unwrap();
+}
+
+fn is_realized_by(state: &AppState) -> String {
+    state.resolve_object_property("isRealizedBy").unwrap()
+}
+
+/// The components `entity` realizes (forward orientation), sorted.
+fn realized(state: &AppState, entity: &str) -> Vec<String> {
+    let terms = graph::CodeTerms::resolve(state).unwrap();
+    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI).unwrap();
+    let mut out = state
+        .store
+        .quads_for_pattern(
+            Some(NamedNodeRef::new(entity).unwrap().into()),
+            Some(NamedNodeRef::new(&terms.realizes).unwrap()),
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+        .filter_map(|q| match q.object {
+            Term::NamedNode(node) => Some(node.into_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    out.sort();
+    out
+}
+
+/// Any `realizes` / `isRealizedBy` quad between the two, in any orientation.
+fn linked_either_way(state: &AppState, entity: &str, component: &str) -> bool {
+    let terms = graph::CodeTerms::resolve(state).unwrap();
+    let inverse = is_realized_by(state);
+    [terms.realizes.as_str(), inverse.as_str()]
+        .iter()
+        .any(|p| has_edge(state, entity, p, component) || has_edge(state, component, p, entity))
+}
+
+fn declare(state: &AppState, component: &str, path: &str) {
+    graph::declare_component_paths(state, component, &[path.to_string()]).unwrap();
+}
+
+fn undeclare(state: &AppState, component: &str, path: &str) {
+    graph::remove_component_paths(state, component, &[path.to_string()]).unwrap();
+}
+
+fn retire(state: &AppState, component: &str) {
+    graph::retire_component(
+        state,
+        component,
+        "Moved out of this repository.",
+        None,
+        false,
+        "tester",
+        Utc::now(),
+    )
+    .unwrap();
+}
+
+fn named(iri: &str, name: &str) -> (String, String) {
+    (iri.to_string(), name.to_string())
+}
+
+#[test]
+fn moved_coverage_repoints_realizes_and_replanning_is_a_no_op() {
+    let state = bootstrap("realizes-moved");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let a = seed_component(&state, "ingest", "src/");
+    let b = seed_component(&state, "pipeline", "lib/");
+    let entry = def_in("app", "runtime/serve().", "src/runtime.rs", "serve");
+    let defs = std::slice::from_ref(&entry);
+    let entity = mint_all(&state, defs)[&entry.normalized_symbol].clone();
+    assert_eq!(realized(&state, &entity), vec![a.clone()]);
+
+    undeclare(&state, &a, "src/");
+    declare(&state, &b, "src/");
+    let plan = plan_with(&state, defs, &[]);
+    assert_eq!(
+        plan.realizes_changes,
+        vec![graph::RealizesChange {
+            entity_iri: entity.clone(),
+            symbol: entry.normalized_symbol.clone(),
+            file: "src/runtime.rs".to_string(),
+            from: vec![named(&a, "ingest")],
+            to: Some(named(&b, "pipeline")),
+        }]
+    );
+    assert!(
+        plan.update.is_empty(),
+        "a link-only change is not an update"
+    );
+    assert_eq!(plan.unchanged, 0, "nor is it unchanged");
+
+    let outcome = graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!((outcome.realizes_moved, outcome.realizes_dropped), (1, 0));
+    assert_eq!(outcome.updated, 0);
+    assert_eq!(realized(&state, &entity), vec![b]);
+
+    let again = plan_with(&state, defs, &[]);
+    assert!(again.realizes_changes.is_empty(), "{again:#?}");
+    assert!(again.update.is_empty() && again.create.is_empty());
+    assert_eq!(again.unchanged, 1);
+    state.ensure_enriched();
+    assert!(validation::validate_project(&state).unwrap().conforms());
+}
+
+#[test]
+fn a_more_specific_component_takes_over_only_the_files_under_it() {
+    let state = bootstrap("realizes-specific");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let core = seed_component(&state, "core", "src/");
+    let store = def_in("app", "graph/store/open().", "src/graph/store.rs", "open");
+    let runtime = def_in("app", "runtime/serve().", "src/runtime.rs", "serve");
+    let defs = [store.clone(), runtime.clone()];
+    let entities = mint_all(&state, &defs);
+    let (store_iri, runtime_iri) = (
+        entities[&store.normalized_symbol].clone(),
+        entities[&runtime.normalized_symbol].clone(),
+    );
+
+    let graph_layer = seed_component(&state, "graph layer", "src/graph/");
+    let plan = plan_with(&state, &defs, &[]);
+    assert_eq!(plan.realizes_changes.len(), 1, "{plan:#?}");
+    assert_eq!(plan.realizes_changes[0].entity_iri, store_iri);
+    assert_eq!(plan.realizes_changes[0].from, vec![named(&core, "core")]);
+    assert_eq!(
+        plan.realizes_changes[0].to,
+        Some(named(&graph_layer, "graph layer"))
+    );
+    assert_eq!(plan.unchanged, 1, "the runtime entity stays with core");
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!(realized(&state, &store_iri), vec![graph_layer]);
+    assert_eq!(realized(&state, &runtime_iri), vec![core]);
+    let again = plan_with(&state, &defs, &[]);
+    assert!(again.realizes_changes.is_empty());
+    assert_eq!(again.unchanged, 2);
+}
+
+/// Plain retirement: an entity whose file an enclosing component still covers
+/// falls back to it; one nothing else covers loses its link. Also the report.
+#[test]
+fn retired_component_links_fall_back_to_an_enclosing_component_or_are_dropped() {
+    let state = bootstrap("realizes-retired");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let outer = seed_component(&state, "outer", "src/");
+    let inner = seed_component(&state, "inner", "src/graph/");
+    let solo = seed_component(&state, "solo", "tools/");
+    let store = def_in("app", "graph/store/open().", "src/graph/store.rs", "open");
+    let gen = def_in("app", "gen/run().", "tools/gen.rs", "run");
+    let defs = [store.clone(), gen.clone()];
+    let entities = mint_all(&state, &defs);
+    let (store_iri, gen_iri) = (
+        entities[&store.normalized_symbol].clone(),
+        entities[&gen.normalized_symbol].clone(),
+    );
+    assert_eq!(realized(&state, &store_iri), vec![inner.clone()]);
+    assert_eq!(realized(&state, &gen_iri), vec![solo.clone()]);
+
+    retire(&state, &inner);
+    retire(&state, &solo);
+    let plan = plan_with(&state, &defs, &[]);
+    let by_entity = plan
+        .realizes_changes
+        .iter()
+        .map(|change| (change.entity_iri.as_str(), change))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(by_entity.len(), 2, "{plan:#?}");
+    // A retired target still prints by name.
+    assert_eq!(
+        by_entity[store_iri.as_str()].from,
+        vec![named(&inner, "inner")]
+    );
+    assert_eq!(
+        by_entity[store_iri.as_str()].to,
+        Some(named(&outer, "outer"))
+    );
+    assert_eq!(by_entity[gen_iri.as_str()].from, vec![named(&solo, "solo")]);
+    assert_eq!(by_entity[gen_iri.as_str()].to, None);
+    assert!(plan.unmapped_paths.contains("tools/gen.rs"));
+
+    // The report: one group per `from -> to`, each entity listed.
+    assert_eq!(
+        plan.summary_line(),
+        "summary: create=0 update=0 unchanged=0 rehome=0 not-rehomed=0 skipped-scope=0 \
+         skipped-tests=0 collisions=0 unmapped=1 orphaned=0 orphaned-with-knowledge=0 \
+         out-of-scope=0 realizes-moved=1 realizes-dropped=1"
+    );
+    assert_eq!(
+        plan.realizes_report(),
+        vec![
+            "realizes links that no longer match component coverage:".to_string(),
+            "  inner -> outer: 1 entity".to_string(),
+            format!(
+                "    {} (src/graph/store.rs) {store_iri}",
+                store.normalized_symbol
+            ),
+            "  solo -> (none: no current component covers the file): 1 entity".to_string(),
+            format!("    {} (tools/gen.rs) {gen_iri}", gen.normalized_symbol),
+        ]
+    );
+
+    let outcome = graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!((outcome.realizes_moved, outcome.realizes_dropped), (1, 1));
+    assert_eq!(realized(&state, &store_iri), vec![outer]);
+    assert!(realized(&state, &gen_iri).is_empty());
+    let again = plan_with(&state, &defs, &[]);
+    assert!(again.realizes_changes.is_empty() && again.update.is_empty());
+    assert_eq!(again.unchanged, 2);
+    assert!(again.realizes_report().is_empty());
+    assert!(again
+        .summary_line()
+        .ends_with(" realizes-moved=0 realizes-dropped=0"));
+}
+
+#[test]
+fn removed_coverage_with_nothing_else_covering_drops_the_link() {
+    let state = bootstrap("realizes-uncovered");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let a = seed_component(&state, "ingest", "src/");
+    let entry = def_in("app", "runtime/serve().", "src/runtime.rs", "serve");
+    let defs = std::slice::from_ref(&entry);
+    let entity = mint_all(&state, defs)[&entry.normalized_symbol].clone();
+
+    undeclare(&state, &a, "src/");
+    let plan = plan_with(&state, defs, &[]);
+    assert_eq!(plan.realizes_changes.len(), 1);
+    assert_eq!(plan.realizes_changes[0].from, vec![named(&a, "ingest")]);
+    assert_eq!(plan.realizes_changes[0].to, None);
+    assert_eq!((plan.realizes_moved(), plan.realizes_dropped()), (0, 1));
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert!(realized(&state, &entity).is_empty());
+    let again = plan_with(&state, defs, &[]);
+    assert!(again.realizes_changes.is_empty() && again.update.is_empty());
+    assert_eq!(again.unchanged, 1);
+}
+
+#[test]
+fn an_entity_with_two_realizes_links_ends_with_exactly_one() {
+    let state = bootstrap("realizes-two");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let a = seed_component(&state, "ingest", "src/");
+    let b = seed_component(&state, "pipeline", "lib/");
+    let entry = def_in("app", "runtime/serve().", "src/runtime.rs", "serve");
+    let defs = std::slice::from_ref(&entry);
+    let entity = mint_all(&state, defs)[&entry.normalized_symbol].clone();
+    // Hand-set, disagreeing with path coverage.
+    insert_edge(&state, &entity, &terms.realizes, &b);
+
+    let plan = plan_with(&state, defs, &[]);
+    assert_eq!(plan.realizes_changes.len(), 1, "{plan:#?}");
+    let mut from = plan.realizes_changes[0].from.clone();
+    from.sort();
+    let mut expected = vec![named(&a, "ingest"), named(&b, "pipeline")];
+    expected.sort();
+    assert_eq!(from, expected);
+    assert_eq!(plan.realizes_changes[0].to, Some(named(&a, "ingest")));
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!(realized(&state, &entity), vec![a]);
+    assert!(plan_with(&state, defs, &[]).realizes_changes.is_empty());
+}
+
+/// Out-of-scope entities are never created or updated by mint, but a stale
+/// link on one is re-pointed. One minted without a link does not gain one.
+#[test]
+fn a_lazily_minted_entity_with_a_stale_link_is_repointed() {
+    let state = bootstrap("realizes-lazy");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let a = seed_component(&state, "ingest", "src/");
+    let b = seed_component(&state, "pipeline", "lib/");
+    let private = DefinitionEntry {
+        is_public: false,
+        ..def_in("app", "runtime/helper().", "src/runtime.rs", "helper")
+    };
+    let bare = DefinitionEntry {
+        is_public: false,
+        ..def_in("app", "gen/helper().", "tools/gen.rs", "helper")
+    };
+    let components = graph::load_components(&state).unwrap();
+    // What `link_code` does for a private definition.
+    let linked = graph::ensure_entity(&state, &terms, &components, &private, "tester")
+        .unwrap()
+        .iri;
+    let unlinked = graph::ensure_entity(&state, &terms, &components, &bare, "tester")
+        .unwrap()
+        .iri;
+    assert_eq!(realized(&state, &linked), vec![a.clone()]);
+    assert!(realized(&state, &unlinked).is_empty());
+
+    undeclare(&state, &a, "src/");
+    declare(&state, &b, "src/");
+    declare(&state, &b, "tools/");
+    let defs = [private.clone(), bare];
+    let plan = plan_with(&state, &defs, &[]);
+    assert_eq!(plan.out_of_scope.len(), 2);
+    assert!(plan.create.is_empty() && plan.update.is_empty());
+    assert_eq!(
+        plan.realizes_changes,
+        vec![graph::RealizesChange {
+            entity_iri: linked.clone(),
+            symbol: private.normalized_symbol.clone(),
+            file: "src/runtime.rs".to_string(),
+            from: vec![named(&a, "ingest")],
+            to: Some(named(&b, "pipeline")),
+        }]
+    );
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!(realized(&state, &linked), vec![b]);
+    assert!(realized(&state, &unlinked).is_empty());
+    assert!(plan_with(&state, &defs, &[]).realizes_changes.is_empty());
+}
+
+/// A stale link held by a stored inverse, or materialized by the reasoner,
+/// must not survive the re-point in either orientation, nor reach `kg.nq`.
+#[test]
+fn repointing_removes_stored_inverses_and_reasoner_copies() {
+    let state = bootstrap("realizes-inverses");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let a = seed_component(&state, "ingest", "src/");
+    let b = seed_component(&state, "pipeline", "lib/");
+    let legacy = seed_component(&state, "legacy", "old/");
+    let entry = def_in("app", "runtime/serve().", "src/runtime.rs", "serve");
+    let defs = std::slice::from_ref(&entry);
+    let entity = mint_all(&state, defs)[&entry.normalized_symbol].clone();
+    let inverse = is_realized_by(&state);
+    // Both orientations stored for `a`; only the inverse for `legacy`.
+    insert_edge(&state, &a, &inverse, &entity);
+    insert_edge(&state, &legacy, &inverse, &entity);
+    state.ensure_enriched();
+    assert!(
+        has_edge(&state, &entity, &terms.realizes, &legacy),
+        "the reasoner materializes the forward edge from the stored inverse"
+    );
+
+    undeclare(&state, &a, "src/");
+    declare(&state, &b, "src/");
+    let plan = plan_with(&state, defs, &[]);
+    assert_eq!(plan.realizes_changes.len(), 1, "{plan:#?}");
+    let mut from = plan.realizes_changes[0].from.clone();
+    from.sort();
+    let mut expected = vec![named(&a, "ingest"), named(&legacy, "legacy")];
+    expected.sort();
+    assert_eq!(from, expected);
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    // Gone in the apply itself, reasoner copies and their tags included, not
+    // only after the next enrichment.
+    for old in [&a, &legacy] {
+        assert!(
+            !linked_either_way(&state, &entity, old),
+            "linked to {old} before enrichment"
+        );
+    }
+    let tagged =
+        moosedev::provenance::reasoner_inferred_data_quads(&state.store, PROJECT_KG_GRAPH_IRI)
+            .unwrap();
+    assert!(
+        !tagged.iter().any(|quad| {
+            let text = quad.to_string();
+            text.contains(&entity) && (text.contains(&a) || text.contains(&legacy))
+        }),
+        "an inference tag of a removed link survived: {tagged:?}"
+    );
+    state.ensure_enriched();
+    for old in [&a, &legacy] {
+        assert!(!linked_either_way(&state, &entity, old), "linked to {old}");
+    }
+    assert_eq!(realized(&state, &entity), vec![b.clone()]);
+
+    let text = moosedev::export::export_canonical_project(&state.store)
+        .unwrap()
+        .text;
+    let entity_ref = format!("<{entity}>");
+    let link_lines = text
+        .lines()
+        .filter(|line| line.contains(&entity_ref))
+        .filter(|line| {
+            line.contains(&format!("<{}>", terms.realizes))
+                || line.contains(&format!("<{inverse}>"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        link_lines,
+        vec![format!(
+            "{entity_ref} <{}> <{b}> <{PROJECT_KG_GRAPH_IRI}> .",
+            terms.realizes
+        )]
+    );
+    assert!(plan_with(&state, defs, &[]).realizes_changes.is_empty());
+    assert!(validation::validate_project(&state).unwrap().conforms());
+}
+
+/// A live tree-sitter fallback entity is never in `definitions`, but its link
+/// goes stale like any other; one the substrate cannot verify is left alone.
+#[test]
+fn a_live_syntactic_entity_with_a_stale_link_is_repointed() {
+    let state = bootstrap("realizes-syntactic");
+    let terms = graph::CodeTerms::resolve(&state).unwrap();
+    let a = seed_component(&state, "fixtures", "tests/fixtures/");
+    let b = seed_component(&state, "fallback code", "other/");
+    let repo_root = state.data_dir.join("fixture-repo");
+    let fixture_path = repo_root.join("tests/fixtures/ts_fallback.rs");
+    std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+    std::fs::write(&fixture_path, include_str!("fixtures/ts_fallback.rs")).unwrap();
+    let substrate = Substrate::from_index_rooted(Index::new(), substrate_meta(), false, repo_root)
+        .expect("rooted substrate");
+    let identity = "ts:rust:tests/fixtures/ts_fallback.rs:fn:<Widget as Render>::render";
+    let entry = substrate
+        .definition_for_symbol(identity)
+        .expect("the fixture declaration is alive");
+    let components = graph::load_components(&state).unwrap();
+    let entity = graph::ensure_entity(&state, &terms, &components, &entry, "tester")
+        .unwrap()
+        .iri;
+    assert_eq!(realized(&state, &entity), vec![a.clone()]);
+
+    undeclare(&state, &a, "tests/fixtures/");
+    declare(&state, &b, "tests/fixtures/");
+    let components = graph::load_components(&state).unwrap();
+    let unverifiable = graph::plan_mint(&state, &[], &terms, &components, None).unwrap();
+    assert!(
+        unverifiable.realizes_changes.is_empty(),
+        "without a substrate the anchor cannot be verified, so it is left alone"
+    );
+    let plan = graph::plan_mint(&state, &[], &terms, &components, Some(&substrate)).unwrap();
+    assert!(plan.orphaned.is_empty());
+    assert_eq!(
+        plan.realizes_changes,
+        vec![graph::RealizesChange {
+            entity_iri: entity.clone(),
+            symbol: identity.to_string(),
+            file: "tests/fixtures/ts_fallback.rs".to_string(),
+            from: vec![named(&a, "fixtures")],
+            to: Some(named(&b, "fallback code")),
+        }]
+    );
+
+    graph::apply_mint(&state, &plan, &terms).unwrap();
+    assert_eq!(realized(&state, &entity), vec![b]);
+    let again = graph::plan_mint(&state, &[], &terms, &components, Some(&substrate)).unwrap();
+    assert!(again.realizes_changes.is_empty());
 }
