@@ -137,6 +137,9 @@ async fn main() -> anyhow::Result<()> {
     };
     let resolved = resolve_terms(&state)?;
 
+    // Current components only: a retired one is never a backfill target, and
+    // `relate` would refuse a new `concerns` edge to it. A seed named like a
+    // retired component shows up as WOULD MINT in the dry run.
     let existing = load_components(&state)?;
     let (mut components, seed_actions) = seed_plan(existing);
     for action in &seed_actions {

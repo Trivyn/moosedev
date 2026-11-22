@@ -96,6 +96,7 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     let terms = CodeTerms::resolve(&state)?;
+    // Current components, exactly as `moosedev mint` plans with.
     let components = graph::load_components(&state)?;
     let definitions = substrate.definitions();
     let plan = graph::plan_mint(&state, &definitions, &terms, &components, Some(&substrate))?;

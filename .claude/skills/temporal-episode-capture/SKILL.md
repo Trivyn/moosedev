@@ -95,6 +95,11 @@ about code that no longer exists. Two per-episode rules and two operator steps k
   exact file). Coverage accumulates across the walk and takes effect at once: a dossier reads a file's
   components from the declared coverage, so a component declared mid-walk governs its files
   immediately.
+- Components move and merge as the code does. Fold a component into another with
+  `retire_component(component, rationale, into)`: preview with `dry_run: true`, show the user the
+  Constraints whose reach changes, and ask once for all the merges in the refactor. Retire one
+  with no successor without `into`; rename one whose scope changed with `rename_component`;
+  remove a single wrong link with `unrelate`.
 - When a record's subject is a *specific* function/type/module that **still exists at HEAD**,
   link it: `link_code(record_iri, predicate, symbol | file/line/col)`. **Never take positions
   from the historical diff** — they are positions in an old revision. Use a SCIP symbol, or

@@ -1138,9 +1138,7 @@ fn is_system_component(state: &AppState, iri: &str) -> anyhow::Result<bool> {
 
 pub(super) fn component_iri_is_current(state: &AppState, iri: &str) -> anyhow::Result<bool> {
     Ok(is_system_component(state, iri)?
-        && first_literal(&state.store, iri, &state.capture.status)
-            .as_deref()
-            .is_none_or(in_working_set))
+        && crate::graph::components::component_in_working_set(state, iri)?)
 }
 
 pub(super) fn code_entity_is_current(state: &AppState, iri: &str) -> anyhow::Result<bool> {

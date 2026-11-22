@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode};
 
 use crate::graph::{
-    code_entities_with_records, first_literal, in_working_set, load_components,
-    resolve_component_query, AppState, ComponentEntry, PROJECT_KG_GRAPH_IRI,
+    code_entities_with_records, component_in_working_set, in_working_set, load_all_components,
+    load_components, resolve_component_query, AppState, ComponentEntry, PROJECT_KG_GRAPH_IRI,
 };
 
 use super::grounding::{
@@ -31,7 +31,9 @@ pub struct StoryResolutionIndex {
 
 impl StoryResolutionIndex {
     pub fn build(state: &AppState) -> anyhow::Result<Self> {
-        let all_components = load_components(state)?;
+        // Every component, retired ones included: a recipe naming a component
+        // that was since retired or merged must still resolve to it (as drift).
+        let all_components = load_all_components(state)?;
         let known_components_by_iri = components_by_iri(&all_components);
         let components = all_components
             .into_iter()
@@ -245,11 +247,10 @@ fn components_by_iri(components: &[ComponentEntry]) -> BTreeMap<String, Componen
 }
 
 fn component_is_current(state: &AppState, component: &ComponentEntry) -> bool {
-    component.iri.as_deref().is_some_and(|iri| {
-        first_literal(&state.store, iri, &state.capture.status)
-            .as_deref()
-            .is_none_or(in_working_set)
-    })
+    component
+        .iri
+        .as_deref()
+        .is_some_and(|iri| component_in_working_set(state, iri).unwrap_or(false))
 }
 
 /// Resolve display metadata and drift from one request-local graph snapshot.

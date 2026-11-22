@@ -753,10 +753,23 @@ pub(crate) fn relate_unlocked(
 
     // Preconditions: a supersession edge decides another record's lifecycle, and
     // SHACL cannot see that — its domain/range for these predicates is
-    // InformationRecord→InformationRecord, which any record pair satisfies.
+    // InformationRecord→InformationRecord, which any record pair satisfies. A
+    // component's lifecycle edges belong to retire_component alone.
+    guard_component_lifecycle_edge(
+        state,
+        &predicate_iri,
+        &super::capture::asserted_project_types(state, &subject),
+        &super::capture::asserted_project_types(state, &object),
+    )?;
     guard_supersession_edge(
         predicate_local,
         first_literal(&state.store, subject_iri, &state.capture.status).as_deref(),
+    )?;
+    super::components::guard_retired_component_endpoint(
+        state,
+        &predicate_iri,
+        super::components::EdgeEnd::Existing(&subject),
+        super::components::EdgeEnd::Existing(&object),
     )?;
 
     // Preconditions: endpoint classes must satisfy the predicate's SHACL shape
@@ -969,6 +982,46 @@ pub fn unrelate(
         removed,
         inverse_removed,
     })
+}
+
+/// Refuse a lifecycle edge (`supersedes`, `isSupersededBy`, `hasRationale`,
+/// `isRationaleFor`) with a `SystemComponent` at either end.
+///
+/// The ontology admits these on components only so `retire_component` can
+/// record a merge and its Rationale; written any other way the edge would claim
+/// a merge whose status flip, edge moves and path moves never happened. The
+/// component shapes do not encode who may write them, so `relate` and inline
+/// capture relations (cluster slots included) all check here. The types are
+/// each endpoint's asserted classes, or for a node not yet written, the class
+/// it is being written with.
+pub(crate) fn guard_component_lifecycle_edge(
+    state: &AppState,
+    predicate_iri: &str,
+    subject_types: &[String],
+    object_types: &[String],
+) -> anyhow::Result<()> {
+    let lifecycle = LIFECYCLE_PREDICATES
+        .iter()
+        .map(|local| state.resolve_object_property(local))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if !lifecycle.iter().any(|iri| iri == predicate_iri) {
+        return Ok(());
+    }
+    let component = state.resolve_class("SystemComponent")?;
+    let is_component = |types: &[String]| {
+        types
+            .iter()
+            .any(|class| super::util::is_subclass_of(&state.store, class, &component))
+    };
+    if is_component(subject_types) || is_component(object_types) {
+        anyhow::bail!(
+            "relationship {:?} on a SystemComponent is written only by retire_component, which \
+             records a merge (with `into`) or a retirement together with its Rationale, status \
+             change and edge moves; it cannot be asserted directly",
+            local_name(predicate_iri)
+        );
+    }
+    Ok(())
 }
 
 /// Refuse a supersession edge that no ratification will ever complete.

@@ -8,8 +8,7 @@ use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, Term};
 use crate::api::error::ApiError;
 use crate::api::models::{RecordDetailResponse, RecordIncomingEdge, RecordOutgoingEdge};
 use crate::graph::{
-    asserted_project_types, first_literal, in_working_set, local_name, AppState,
-    PROJECT_KG_GRAPH_IRI,
+    asserted_project_types, first_literal, local_name, AppState, PROJECT_KG_GRAPH_IRI,
 };
 
 pub async fn get_record(
@@ -30,8 +29,7 @@ pub async fn get_record(
     let status = first_literal(&state.store, &iri, &state.capture.status);
     let outgoing = outgoing_edges(&state, &record);
     let incoming = incoming_edges(&state, &record);
-    let story_component_iri =
-        story_component_for_record(&state, &iri, &kind, status.as_deref(), &outgoing, &incoming);
+    let story_component_iri = story_component_for_record(&state, &iri, &kind, &outgoing, &incoming);
 
     Ok(Json(RecordDetailResponse {
         code: super::code::code_detail(&state, &iri),
@@ -52,11 +50,14 @@ fn story_component_for_record(
     state: &AppState,
     record_iri: &str,
     record_kind: &str,
-    record_status: Option<&str>,
     outgoing: &[RecordOutgoingEdge],
     incoming: &[RecordIncomingEdge],
 ) -> Option<String> {
-    if record_kind == "SystemComponent" && status_is_current(record_status) {
+    // Component status goes through the shared reader (a retiring literal
+    // wins), so the link matches what the Story resolver will accept.
+    let story_current =
+        |iri: &str| crate::graph::component_in_working_set(state, iri).unwrap_or(false);
+    if record_kind == "SystemComponent" && story_current(record_iri) {
         return Some(record_iri.to_string());
     }
 
@@ -72,10 +73,7 @@ fn story_component_for_record(
                 })
                 .map(|edge| edge.source_iri.as_str()),
         )
-        .filter(|iri| {
-            let status = first_literal(&state.store, iri, &state.capture.status);
-            status_is_current(status.as_deref())
-        })
+        .filter(|iri| story_current(iri))
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
 
@@ -84,10 +82,6 @@ fn story_component_for_record(
     } else {
         None
     }
-}
-
-fn status_is_current(status: Option<&str>) -> bool {
-    status.is_none_or(in_working_set)
 }
 
 pub(crate) fn record_iri_for_uuid(state: &AppState, uuid: &str) -> Option<String> {

@@ -558,3 +558,268 @@ async fn served_sparql_description_names_the_loaded_term_namespaces() {
     backend.abort();
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+fn seed(state: &AppState, kind: &str, title: &str) -> String {
+    let class_iri = state.resolve_class(kind).expect("known class");
+    moosedev::graph::record_instance(
+        state,
+        &moosedev::graph::RecordInput {
+            class_iri,
+            class_local: kind.to_string(),
+            properties: vec![
+                (moose::RDFS_LABEL.to_string(), title.to_string()),
+                (state.capture.title.clone(), title.to_string()),
+                (state.capture.status.clone(), "accepted".to_string()),
+            ],
+        },
+        "tester",
+        Utc::now(),
+    )
+    .expect("seed record")
+}
+
+/// Components `ingest files` (src/, shared/) and `pipeline` (lib/, shared/),
+/// one Constraint and one Decision on the first, served over a socket.
+struct LifecycleFixture {
+    state: Arc<AppState>,
+    a: String,
+    b: String,
+    constraint: String,
+    decision: String,
+    client: rmcp::service::RunningService<RoleClient, ()>,
+    backend: tokio::task::JoinHandle<()>,
+    data_dir: PathBuf,
+}
+
+async fn lifecycle_fixture(tag: &str) -> LifecycleFixture {
+    let data_dir = fresh_data_dir(tag);
+    let state = Arc::new(AppState::bootstrap(&data_dir, &ontology_dir()).expect("bootstrap"));
+    let a = seed(&state, "SystemComponent", "ingest files");
+    let b = seed(&state, "SystemComponent", "pipeline");
+    moosedev::graph::declare_component_paths(
+        &state,
+        &a,
+        &["src/".to_string(), "shared/".to_string()],
+    )
+    .unwrap();
+    moosedev::graph::declare_component_paths(
+        &state,
+        &b,
+        &["lib/".to_string(), "shared/".to_string()],
+    )
+    .unwrap();
+    let constraint = seed(&state, "Constraint", "Ingest must stay streaming");
+    moosedev::graph::relate(&state, &constraint, "constrains", &a).unwrap();
+    let decision = seed(&state, "ArchitecturalDecision", "Ingest decision");
+    moosedev::graph::relate(&state, &decision, "concerns", &a).unwrap();
+    let socket = runtime::socket_path_for(&data_dir);
+    let backend = spawn_backend(MooseDevServer::new(state.clone()), socket.clone()).await;
+    wait_for_socket(&socket).await;
+    let client = connect_client(&socket).await;
+    LifecycleFixture {
+        state,
+        a,
+        b,
+        constraint,
+        decision,
+        client,
+        backend,
+        data_dir,
+    }
+}
+
+impl LifecycleFixture {
+    async fn finish(self) {
+        self.client.cancel().await.ok();
+        self.backend.abort();
+        let _ = std::fs::remove_dir_all(&self.data_dir);
+    }
+}
+
+fn status_of(state: &AppState, iri: &str) -> Vec<String> {
+    let status = state.capture.status.clone();
+    let graph = oxigraph::model::NamedNodeRef::new(moosedev::graph::PROJECT_KG_GRAPH_IRI).unwrap();
+    let subject = oxigraph::model::NamedNode::new(iri).unwrap();
+    let predicate = oxigraph::model::NamedNode::new(status).unwrap();
+    state
+        .store
+        .quads_for_pattern(
+            Some(subject.as_ref().into()),
+            Some(predicate.as_ref()),
+            None,
+            Some(oxigraph::model::GraphNameRef::NamedNode(graph)),
+        )
+        .map(|q| match q.unwrap().object {
+            oxigraph::model::Term::Literal(l) => l.value().to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn retire_component_dry_run_names_the_constraint_and_writes_nothing() {
+    let f = lifecycle_fixture("retire-dry").await;
+    let reply = call_raw(
+        &f.client,
+        "retire_component",
+        json!({"component": "ingest files", "into": "pipeline",
+               "rationale": "ingest is one stage of the pipeline", "dry_run": true}),
+    )
+    .await;
+    assert_ne!(reply.is_error, Some(true), "{}", response_text(&reply));
+    let text = response_text(&reply);
+    println!("DRY RUN MERGE REPLY:\n{text}");
+    assert!(
+        text.starts_with("DRY RUN — nothing written: would merge"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Constraints whose reach widens to \"pipeline\" (1):"),
+        "{text}"
+    );
+    assert!(text.contains("\"Ingest must stay streaming\""), "{text}");
+    assert!(text.contains(&f.constraint), "{text}");
+    assert!(text.contains("Confirm this with the user"), "{text}");
+    // Nothing was written: the component is still current.
+    assert_eq!(status_of(&f.state, &f.a), vec!["accepted".to_string()]);
+    let listing = moosedev::graph::load_components(&f.state).unwrap();
+    assert!(
+        listing
+            .iter()
+            .any(|c| c.iri.as_deref() == Some(f.a.as_str())),
+        "ingest files left the working set"
+    );
+    f.finish().await;
+}
+
+/// A blank `into` is a malformed merge, never a plain retire.
+#[tokio::test]
+async fn retire_component_refuses_a_blank_into() {
+    let f = lifecycle_fixture("retire-blank-into").await;
+    for into in ["", "   "] {
+        let reply = call_raw(
+            &f.client,
+            "retire_component",
+            json!({"component": "ingest files", "into": into,
+                   "rationale": "ingest is one stage of the pipeline"}),
+        )
+        .await;
+        assert_eq!(reply.is_error, Some(true), "{}", response_text(&reply));
+        let text = response_text(&reply);
+        assert!(text.contains("`into` must name the component"), "{text}");
+        assert!(text.contains("omit `into`"), "{text}");
+    }
+    assert_eq!(status_of(&f.state, &f.a), vec!["accepted".to_string()]);
+    assert!(moosedev::graph::load_components(&f.state)
+        .unwrap()
+        .iter()
+        .any(|c| c.iri.as_deref() == Some(f.a.as_str())));
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn retire_component_merge_reply_reports_moved_links_and_paths() {
+    let f = lifecycle_fixture("retire-merge").await;
+    let reply = call_raw(
+        &f.client,
+        "retire_component",
+        json!({"component": "ingest files", "into": "pipeline",
+               "rationale": "ingest is one stage of the pipeline"}),
+    )
+    .await;
+    assert_ne!(reply.is_error, Some(true), "{}", response_text(&reply));
+    let text = response_text(&reply);
+    println!("REAL MERGE REPLY:\n{text}");
+    assert!(text.starts_with("Merged \"ingest files\""), "{text}");
+    assert!(!text.contains("DRY RUN"), "{text}");
+    assert!(text.contains("is now superseded"), "{text}");
+    assert!(text.contains("Links moved (2):"), "{text}");
+    assert!(text.contains("  constrains (1):"), "{text}");
+    assert!(text.contains(&format!("    - {}", f.constraint)), "{text}");
+    assert!(text.contains("  concerns (1):"), "{text}");
+    assert!(text.contains(&format!("    - {}", f.decision)), "{text}");
+    assert!(text.contains("Paths moved: [src/]"), "{text}");
+    assert!(
+        text.contains("Paths already on the successor: [shared/]"),
+        "{text}"
+    );
+    assert!(!text.contains("Confirm this with the user"), "{text}");
+    // The write happened: the retired component left the current set.
+    let listing = moosedev::graph::load_components(&f.state).unwrap();
+    assert!(
+        !listing
+            .iter()
+            .any(|c| c.iri.as_deref() == Some(f.a.as_str())),
+        "ingest files is still current"
+    );
+    assert!(listing
+        .iter()
+        .any(|c| c.iri.as_deref() == Some(f.b.as_str())));
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn retire_component_plain_reply_lists_constraint_as_no_longer_delivered() {
+    let f = lifecycle_fixture("retire-plain").await;
+    let reply = call_raw(
+        &f.client,
+        "retire_component",
+        json!({"component": "ingest files", "rationale": "the stage was deleted"}),
+    )
+    .await;
+    assert_ne!(reply.is_error, Some(true), "{}", response_text(&reply));
+    let text = response_text(&reply);
+    println!("PLAIN RETIRE REPLY:\n{text}");
+    assert!(text.starts_with("Retired \"ingest files\""), "{text}");
+    assert!(
+        text.contains("Constraints no longer delivered (1):"),
+        "{text}"
+    );
+    assert!(text.contains("\"Ingest must stay streaming\""), "{text}");
+    assert!(!text.contains("widens"), "{text}");
+    assert!(
+        text.contains("Remaining paths (kept as history): [src/, shared/]")
+            || text.contains("Remaining paths (kept as history): [shared/, src/]"),
+        "{text}"
+    );
+    assert!(text.contains("Remaining linked records"), "{text}");
+    assert!(
+        text.contains("ArchitecturalDecision \"Ingest decision\""),
+        "{text}"
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn rename_component_reply_states_old_and_new_name() {
+    let f = lifecycle_fixture("rename").await;
+    let reply = call_raw(
+        &f.client,
+        "rename_component",
+        json!({"component": "ingest files", "new_name": "ingest stage"}),
+    )
+    .await;
+    assert_eq!(
+        response_text(&reply),
+        format!("Renamed \"ingest files\" -> \"ingest stage\" ({})", f.a)
+    );
+    let again = call_raw(
+        &f.client,
+        "rename_component",
+        json!({"component": f.a, "new_name": "ingest stage"}),
+    )
+    .await;
+    assert!(
+        response_text(&again).contains("already has that name"),
+        "{}",
+        response_text(&again)
+    );
+    let clash = call_raw(
+        &f.client,
+        "rename_component",
+        json!({"component": f.a, "new_name": "pipeline"}),
+    )
+    .await;
+    assert_eq!(clash.is_error, Some(true));
+    f.finish().await;
+}

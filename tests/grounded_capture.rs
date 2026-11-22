@@ -515,9 +515,13 @@ fn capture_guards_record_and_link_queue_as_one_proposal_write() {
         .find("state.lock_proposal_writes()?")
         .expect("capture acquires proposal-write lock");
     let record = capture
-        .find("record_instance_with_relation_args(")
-        .expect("capture records the proposal");
+        .find("record_instance_with_relation_args_unlocked(")
+        .expect("capture records the proposal under its caller-held guard");
     assert!(lock < record, "proposal lock must precede record creation");
+    assert!(
+        !capture.contains("record_instance_with_relation_args("),
+        "capture must not recursively acquire the proposal-write lock to record"
+    );
     assert!(
         capture.contains("propose_link_unlocked("),
         "capture must reuse its caller-held guard for queued links"
