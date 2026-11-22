@@ -1063,10 +1063,13 @@ async fn mint_mode(
         anyhow::bail!("post-mint validation failed");
     }
     println!(
-        "mint applied: created {}, updated {}, re-homed {} in {:.3}s",
+        "mint applied: created {}, updated {}, re-homed {}, realizes re-pointed {}, \
+         realizes dropped {} in {:.3}s",
         outcome.created.len(),
         outcome.updated,
         outcome.rehomed,
+        outcome.realizes_moved,
+        outcome.realizes_dropped,
         started.elapsed().as_secs_f64()
     );
     Ok(())
@@ -1270,6 +1273,9 @@ fn report_mint_plan(plan: &graph::MintPlan, components: &[graph::ComponentEntry]
             }
         }
     }
+    for line in plan.realizes_report() {
+        println!("{line}");
+    }
     if !plan.orphaned.is_empty() {
         println!("orphaned entities:");
         for (iri, symbol) in &plan.orphaned {
@@ -1309,21 +1315,7 @@ fn report_mint_plan(plan: &graph::MintPlan, components: &[graph::ComponentEntry]
         }
     }
 
-    println!(
-        "summary: create={} update={} unchanged={} rehome={} not-rehomed={} skipped-scope={} skipped-tests={} collisions={} unmapped={} orphaned={} orphaned-with-knowledge={} out-of-scope={}",
-        plan.create.len(),
-        plan.update.len(),
-        plan.unchanged,
-        plan.rehome.len(),
-        plan.unresolved_rehomes.len(),
-        plan.skipped_scope,
-        plan.skipped_tests,
-        plan.collisions.len(),
-        plan.unmapped_paths.len(),
-        plan.orphaned.len(),
-        plan.orphan_links.len(),
-        plan.out_of_scope.len()
-    );
+    println!("{}", plan.summary_line());
 }
 
 /// Print one planned create/update line, including the component link if present.
