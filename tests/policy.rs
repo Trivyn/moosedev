@@ -583,6 +583,51 @@ fn file_touch_within_max_bytes_shortens_later_sections_to_protected_knowledge() 
     );
 }
 
+/// An accepted Constraint attached to the component only by `constrains` reaches
+/// the push, and stays protected under a byte bound, exactly like one attached
+/// by `concerns`.
+#[test]
+fn component_constraint_linked_by_constrains_reaches_and_survives_the_push_bound() {
+    let f = setup("policy-component-constrains");
+    let component = graph::load_components(&f.state).unwrap()[0]
+        .iri
+        .clone()
+        .expect("component IRI");
+    let rule = record(&f.state, "Constraint", "foo constrains rule", "accepted");
+    graph::relate(&f.state, &rule, "constrains", &component).expect("constrains component");
+    for (title, entity) in [("alpha note", &f.alpha), ("beta note", &f.beta)] {
+        let lesson = record(&f.state, "Lesson", title, "accepted");
+        graph::relate(&f.state, &lesson, "concerns", entity).expect("concerns entity");
+    }
+
+    let push = |max_bytes: Option<usize>| {
+        let event = PolicyEvent::EntityTouched {
+            file: FILE.to_string(),
+            line: None,
+            col: None,
+            max_bytes,
+        };
+        match evaluate(&f.state, &f.repo_root, &event).expect("evaluate") {
+            PolicyDecision::Inject {
+                dossier_markdown, ..
+            } => dossier_markdown,
+            other => panic!("expected an inject, got {other:?}"),
+        }
+    };
+
+    let whole = push(None);
+    assert_eq!(
+        whole.matches("- [Constraint] foo constrains rule").count(),
+        1,
+        "{whole}"
+    );
+    let bounded = push(Some(1));
+    assert!(
+        bounded.contains("- [Constraint] foo constrains rule"),
+        "{bounded}"
+    );
+}
+
 /// Rust's synthetic whole-file module is never a position target, but knowledge
 /// anchored to it reaches every push of its file.
 #[test]

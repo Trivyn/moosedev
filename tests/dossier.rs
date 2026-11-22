@@ -533,6 +533,74 @@ fn components_come_from_path_coverage_including_enclosing_ones() {
     assert!(!hover.contains("Project-wide rule"));
 }
 
+/// A Constraint attaches to a component by `constrains` as well as `concerns`,
+/// in either stored orientation; the dossier delivers it from both the realized
+/// and an enclosing component, once, even when linked both ways.
+#[test]
+fn component_constraints_reach_the_dossier_by_constrains_in_either_orientation() {
+    let state = state_with_substrate("component-constrains");
+    let entity_iri = pre_mint_public(&state);
+    let src_component = graph::load_components(&state).unwrap()[0]
+        .iri
+        .clone()
+        .unwrap();
+    let file_component = seed_component(&state, "runtime file", "src/runtime.rs");
+    let project_component = seed_component(&state, "project", graph::COVERS_WHOLE_PROJECT);
+
+    let direct = record(&state, "ArchitecturalDecision", "Direct entity decision");
+    let realized = record(&state, "Constraint", "Realized constrains rule");
+    let both = record(&state, "Constraint", "Both predicates rule");
+    let inverse_only = record(&state, "Constraint", "Inverse only rule");
+    let enclosing = record(&state, "Constraint", "Enclosing constrains rule");
+    graph::relate(&state, &direct, "concerns", &entity_iri).unwrap();
+    graph::relate(&state, &realized, "constrains", &file_component).unwrap();
+    graph::relate(&state, &both, "concerns", &file_component).unwrap();
+    graph::relate(&state, &both, "constrains", &file_component).unwrap();
+    graph::relate(&state, &file_component, "isConstrainedBy", &inverse_only).unwrap();
+    graph::relate(&state, &enclosing, "constrains", &project_component).unwrap();
+    let _ = src_component;
+
+    let dossier = graph::get_entity_dossier(&state, &public_position())
+        .unwrap()
+        .expect("dossier");
+    let mut realized_titles: Vec<&str> = dossier
+        .component_records
+        .iter()
+        .map(|r| r.title.as_str())
+        .collect();
+    realized_titles.sort();
+    assert_eq!(
+        realized_titles,
+        [
+            "Both predicates rule",
+            "Inverse only rule",
+            "Realized constrains rule"
+        ]
+    );
+    assert!(dossier
+        .component_records
+        .iter()
+        .all(|r| r.kind == "Constraint"));
+    let project = dossier
+        .enclosing_components
+        .iter()
+        .find(|c| c.iri == project_component)
+        .expect("project component");
+    assert_eq!(
+        project
+            .records
+            .iter()
+            .map(|r| r.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Enclosing constrains rule"]
+    );
+
+    let exhaustive = graph::render_markdown(&dossier);
+    assert!(exhaustive.contains("**Via component runtime file**"));
+    assert!(exhaustive.contains("**Via enclosing component project**"));
+    assert_eq!(exhaustive.matches("Both predicates rule").count(), 1);
+}
+
 /// Deprecated records are hidden, while superseded directly linked records remain visible.
 #[test]
 fn retracted_filtered_and_superseded_shown() {

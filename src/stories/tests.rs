@@ -553,6 +553,38 @@ fn inverse_concerns_is_evidence_while_proposed_knowledge_is_only_a_gap_signal() 
 }
 
 #[test]
+fn constrains_links_are_component_records_in_either_orientation() {
+    let state = story_state("constrains-component-records");
+    let component = "https://example.test/component/constrained";
+    type_component(&state, component);
+    let forward = record_with_status(&state, "Forward constrains", "accepted");
+    let inverse = record_with_status(&state, "Inverse constrains", "accepted");
+    let both = record_with_status(&state, "Both predicates", "accepted");
+    let proposed = record_with_status(&state, "Proposed constrains", "proposed");
+    link_edge(&state, &forward, "constrains", component);
+    link_edge(&state, component, "isConstrainedBy", &inverse);
+    link_edge(&state, &both, "concerns", component);
+    link_edge(&state, &both, "constrains", component);
+    link_edge(&state, &proposed, "constrains", component);
+
+    let mut expected = vec![forward.clone(), inverse.clone(), both.clone()];
+    expected.sort();
+    let mut iris = component_records(&state, component)
+        .unwrap()
+        .into_iter()
+        .map(|record| record.evidence.iri)
+        .collect::<Vec<_>>();
+    iris.sort();
+    assert_eq!(iris, expected);
+    assert!(record_concerns_component(&state, &forward, component).unwrap());
+    assert!(record_concerns_component(&state, &inverse, component).unwrap());
+    assert_eq!(
+        pending_component_record_count(&state, component).unwrap(),
+        1
+    );
+}
+
+#[test]
 fn generated_boundary_round_trips_as_intrinsic_subject_evidence() {
     let state = story_state("boundary-round-trip");
     let component_iri = "https://example.test/component/boundary";
