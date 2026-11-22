@@ -63,13 +63,17 @@ fn story_component_for_record(
 
     let mut candidates = outgoing
         .iter()
-        .filter(|edge| edge.predicate == "concerns" && edge.target_kind == "SystemComponent")
+        .filter(|edge| {
+            matches!(edge.predicate.as_str(), "concerns" | "constrains")
+                && edge.target_kind == "SystemComponent"
+        })
         .map(|edge| edge.target_iri.as_str())
         .chain(
             incoming
                 .iter()
                 .filter(|edge| {
-                    edge.predicate == "isConcernedBy" && edge.source_kind == "SystemComponent"
+                    matches!(edge.predicate.as_str(), "isConcernedBy" | "isConstrainedBy")
+                        && edge.source_kind == "SystemComponent"
                 })
                 .map(|edge| edge.source_iri.as_str()),
         )

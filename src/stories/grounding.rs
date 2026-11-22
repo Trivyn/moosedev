@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNode, Term};
 
 use crate::graph::{
-    asserted_project_types, first_literal, in_working_set, local_name, relevant_context_snapshot,
-    AppState, CodeTerms, PROJECT_KG_GRAPH_IRI,
+    asserted_project_types, component_record_iris, first_literal, in_working_set, local_name,
+    relevant_context_snapshot, AppState, CodeTerms, PROJECT_KG_GRAPH_IRI,
 };
 
 use super::model::{
@@ -841,42 +841,6 @@ pub(super) fn component_records(
             .then(a.evidence.iri.cmp(&b.evidence.iri))
     });
     Ok(out)
-}
-
-/// Return records linked to a component through either ontology direction.
-/// Keeping the pair together prevents Story surfaces from drifting on inverse edges.
-fn component_record_iris(
-    state: &AppState,
-    component_iri: &str,
-) -> anyhow::Result<BTreeSet<String>> {
-    let graph = NamedNodeRef::new(PROJECT_KG_GRAPH_IRI)?;
-    let component = NamedNodeRef::new(component_iri)?;
-    let concerns = state.resolve_object_property("concerns")?;
-    let predicate = NamedNodeRef::new(&concerns)?;
-    let mut records = BTreeSet::new();
-    for quad in state.store.quads_for_pattern(
-        None,
-        Some(predicate),
-        Some(component.into()),
-        Some(GraphNameRef::NamedNode(graph)),
-    ) {
-        if let NamedOrBlankNode::NamedNode(record) = quad?.subject {
-            records.insert(record.as_str().to_string());
-        }
-    }
-    let inverse_iri = state.resolve_object_property("isConcernedBy")?;
-    let inverse = NamedNodeRef::new(&inverse_iri)?;
-    for quad in state.store.quads_for_pattern(
-        Some(component.into()),
-        Some(inverse),
-        None,
-        Some(GraphNameRef::NamedNode(graph)),
-    ) {
-        if let Term::NamedNode(record) = quad?.object {
-            records.insert(record.as_str().to_string());
-        }
-    }
-    Ok(records)
 }
 
 pub(super) fn pending_component_record_count(

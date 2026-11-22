@@ -527,7 +527,13 @@ async fn hover_serves_linked_dossier_utf8() -> anyhow::Result<()> {
         ("Lesson", "Component lesson"),
     ] {
         let component_record = record(&state, kind, title);
-        graph::relate(&state, &component_record, "concerns", &component_iri)?;
+        // A Constraint attaches by its documented predicate, `constrains`.
+        let predicate = if kind == "Constraint" {
+            "constrains"
+        } else {
+            "concerns"
+        };
+        graph::relate(&state, &component_record, predicate, &component_iri)?;
     }
     let socket = spawn_listener(state.clone(), &data_dir, &repo_root).await?;
 

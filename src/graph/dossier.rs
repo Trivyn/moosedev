@@ -177,10 +177,12 @@ pub fn get_entity_dossier(
         .map(|record| record.iri.as_str())
         .collect::<BTreeSet<_>>();
     let mut component_records: Vec<RecordSummary> = match realizes.as_ref() {
-        Some((component_iri, _)) => collect_records(state, &pairs.concerns, component_iri)?
-            .into_iter()
-            .filter(|record| !direct_iris.contains(record.iri.as_str()))
-            .collect(),
+        Some((component_iri, _)) => {
+            collect_component_records(state, &pairs.component, component_iri)?
+                .into_iter()
+                .filter(|record| !direct_iris.contains(record.iri.as_str()))
+                .collect()
+        }
         None => Vec::new(),
     };
     sort_records(&mut component_records);
@@ -188,10 +190,11 @@ pub fn get_entity_dossier(
     listed.extend(component_records.iter().map(|record| record.iri.clone()));
     let mut enclosing_components = Vec::new();
     for (iri, label) in by_path.iter().skip(1) {
-        let mut records: Vec<RecordSummary> = collect_records(state, &pairs.concerns, iri)?
-            .into_iter()
-            .filter(|record| listed.insert(record.iri.clone()))
-            .collect();
+        let mut records: Vec<RecordSummary> =
+            collect_component_records(state, &pairs.component, iri)?
+                .into_iter()
+                .filter(|record| listed.insert(record.iri.clone()))
+                .collect();
         sort_records(&mut records);
         enclosing_components.push(ComponentContext {
             iri: iri.clone(),
@@ -799,7 +802,9 @@ enum CanonicalDirection {
 
 /// Resolved predicate sets for direct records and component secondary records.
 struct LinkPairs {
-    concerns: Vec<PredicatePair>,
+    /// The predicates by which records govern a component: `concerns` and
+    /// `constrains` (a Constraint may attach either way), in both orientations.
+    component: Vec<PredicatePair>,
     all: Vec<PredicatePair>,
 }
 
@@ -846,7 +851,7 @@ impl LinkPairs {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self {
-            concerns: all[..1].to_vec(),
+            component: all[..2].to_vec(),
             all,
         })
     }
@@ -867,6 +872,34 @@ fn collect_records(
         }
     }
     Ok(records.into_values().collect())
+}
+
+/// Collect a component's records: one summary per record even when it is
+/// linked by both `concerns` and `constrains` (the first predicate wins).
+fn collect_component_records(
+    state: &AppState,
+    pairs: &[PredicatePair],
+    component_iri: &str,
+) -> anyhow::Result<Vec<RecordSummary>> {
+    let mut seen = BTreeSet::new();
+    Ok(collect_records(state, pairs, component_iri)?
+        .into_iter()
+        .filter(|record| seen.insert(record.iri.clone()))
+        .collect())
+}
+
+/// IRIs of every record linked to a component by `concerns` or `constrains`,
+/// in either stored orientation. Not lifecycle-filtered; callers apply their own.
+pub(crate) fn component_record_iris(
+    state: &AppState,
+    component_iri: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    let pairs = LinkPairs::resolve(state)?;
+    let mut out = BTreeSet::new();
+    for pair in &pairs.component {
+        out.extend(linked_records(state, pair, component_iri)?);
+    }
+    Ok(out)
 }
 
 /// Return candidate record IRIs linked through the canonical or inverse edge.

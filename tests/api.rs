@@ -338,6 +338,22 @@ fn project_quads(state: &AppState) -> std::collections::BTreeSet<String> {
 }
 
 #[tokio::test]
+async fn constraint_record_detail_links_its_component_story_by_constrains() {
+    let dir = temp_dir("record-detail-constrains");
+    let state = AppState::bootstrap(&dir, &ontology_dir()).expect("bootstrap app state");
+    let constraint = record_api_constraint(&state, "Component constraint");
+    let component = record_story_component(&state, "Constrained component");
+    graph::relate(&state, &constraint, "constrains", &component).expect("constrains component");
+    let uuid = constraint.rsplit('/').next().expect("record uuid");
+    let server = test_server(state);
+
+    let response = server.get(&format!("/api/v1/records/{uuid}")).await;
+
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>()["story_component_iri"], component);
+}
+
+#[tokio::test]
 async fn story_api_covers_recipe_lifecycle_generation_ambiguity_and_grading() {
     let project = temp_dir("stories");
     let _cleanup = CleanupDir(project.clone());
